@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_marginTop="24dp"
+        android:fillViewport="true" >
+
+        <LinearLayout
+            android:orientation="vertical"
+            android:padding="8dp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnConnect"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Connect to Camera" />
+
+                <FrameLayout
+                android:id="@+id/rootLayout"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+
+                <ImageView
+                    android:id="@+id/liveViewImage"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:adjustViewBounds="true"
+                    android:scaleType="fitCenter"
+                    android:layout_marginTop="8dp"
+                    android:layout_marginBottom="8dp"
+                    android:minHeight="250dp" />
+
+                <View
+                    android:id="@+id/focusRectangle"
+                    android:layout_width="64dp"
+                    android:layout_height="64dp"
+                    android:background="@drawable/focus_rectangle"
+                    android:visibility="gone" />
+
+                </FrameLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingBottom="8dp">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnAutoFocus"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:text="Auto Focus"
+                    android:layout_weight="1" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnCapture"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:text="Capture"
+                    android:layout_weight="1"
+                    android:layout_marginStart="8dp" />
+
+            </LinearLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnVideo"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Start Video"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:id="@+id/textFNumber"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="F-Number: None" />
+
+            <SeekBar
+                android:id="@+id/seekBarFNumber"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="5" />
+
+            <TextView
+                android:id="@+id/textShutterSpeed"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Shutter Speed: None" />
+
+            <SeekBar
+                android:id="@+id/seekBarShutterSpeed"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="5" />
+
+            <TextView
+                android:id="@+id/textIsoValue"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="ISO: None" />
+
+            <SeekBar
+                android:id="@+id/seekBarIso"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="5" />
+
+            <TextView
+                android:id="@+id/textExpComp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Exposure Compensation: None" />
+
+            <SeekBar
+                android:id="@+id/seekBarExpComp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="5" 
+                android:layout_marginBottom="16dp"/>
+
+             <TextView
+                android:id="@+id/textInterval"
+                android:text="Interval: Burst"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"/>
+
+            <SeekBar
+                android:id="@+id/seekBarInterval"
+                android:max="109"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"/>
+
+            <TextView
+                android:id="@+id/textTotalShots"
+                android:text="Total shots: 10"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"/>
+
+            <SeekBar
+                android:id="@+id/seekBarTotalShots"
+                android:max="100"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"/>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnStartStop"
+                android:text="Start Intervalometer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"/>
+
+        </LinearLayout>
+
+    </ScrollView>
+
+    <!-- Battery + Charging + Alert Icons in top-right corner -->
+    <LinearLayout
+        android:id="@+id/batteryStatusContainer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="8dp"
+        android:layout_gravity="top|end"
+        android:gravity="center_vertical"
+        android:layout_marginTop="0dp"
+        android:layout_marginEnd="0dp">
+
+        <!-- Single battery icon (normal or alert) -->
+        <ImageView
+            android:id="@+id/batteryIcon"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:visibility="gone"
+            android:contentDescription="Battery Status"/>
+
+        <!-- Charging icon shown when charging -->
+        <ImageView
+            android:id="@+id/chargingIcon"
+            android:layout_width="16dp"
+            android:layout_height="16dp"
+            android:visibility="gone"
+            android:contentDescription="Charging Status"/>
+
+    </LinearLayout>
+
+</FrameLayout>
