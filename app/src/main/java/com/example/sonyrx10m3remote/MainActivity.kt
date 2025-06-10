@@ -1,5 +1,6 @@
 package com.example.sonyrx10m3remote
 
+import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
@@ -25,6 +26,8 @@ import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.ColorUtils
 import androidx.lifecycle.lifecycleScope
+import com.example.sonyrx10m3remote.CameraController.CaptureResult
+import com.example.sonyrx10m3remote.MediaManager.MediaInfo
 import com.google.android.material.button.MaterialButton
 import com.google.zxing.integration.android.IntentIntegrator
 import kotlinx.coroutines.*
@@ -101,6 +104,9 @@ class MainActivity : AppCompatActivity() {
     private var currentBatteryAlerting = false
     private var batteryPollJob: Job? = null
 
+    // Media manager components
+    lateinit var mediaManager: MediaManager
+
     // QR code scan result handler
     private val qrScannerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         Log.d(TAG, "QR scan resultCode=${result.resultCode}, data=${result.data}")
@@ -130,6 +136,10 @@ class MainActivity : AppCompatActivity() {
 
         // Setup UI buttons and listeners
         setupUI()
+
+        // Temporary - making the sharedpreferences file
+        val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("auto_download_jpeg", true).apply()
     }
 
     // Initialize UI references and click actions.
@@ -153,6 +163,9 @@ class MainActivity : AppCompatActivity() {
         seekBarTotalShots = findViewById(R.id.seekBarTotalShots)
         btnStartStop = findViewById<MaterialButton>(R.id.btnStartStop)
 
+        val aspectRatioLayout = findViewById<com.example.sonyrx10m3remote.ui.AspectRatioFrameLayout>(R.id.rootLayout)
+        aspectRatioLayout.setAspectRatio(4f / 3f) // or 3f / 2f for photo aspect ratio, depending on your source
+
         setUiEnabled(false)
         btnConnect.isEnabled = true
 
@@ -162,10 +175,14 @@ class MainActivity : AppCompatActivity() {
                 // ======= DISCONNECT FLOW =======
                 lifecycleScope.launch {
                     cameraController.stopAFPoll()
-                    val stoppedBulb = stopBulbExposure()  // suspend function awaited here
-                    if (!stoppedBulb) {
+
+                    val stopResult = stopBulbExposure()  // suspend function returning CaptureResult
+                    if (stopResult.success) {
+                        showStatus("Bulb exposure stopped successfully during disconnect")
+                    } else {
                         showStatus("Warning: Failed to stop bulb exposure during disconnect")
                     }
+
                     stopVideoRecording()
                     intervalometer?.stop()
                     cameraController.stopMjpegStream()
@@ -491,8 +508,11 @@ class MainActivity : AppCompatActivity() {
                     }
                 },
                 getShutterSpeed = { if (isBulbMode) "BULB" else "OTHER" },
-                startBulb = { startBulbExposure() },
-                stopBulb = { stopBulbExposure() },
+                startBulb = { runBlocking { startBulbExposure() } }, // assuming startBulbExposure returns Boolean
+                stopBulb = { runBlocking {
+                    val result = stopBulbExposure()
+                    result.success
+                } },
                 performTimedCapture = { performTimedCapture(it) },
                 getBulbDurationMs = { bulbDurationMs },
                 onError = { errorMessage ->
@@ -639,6 +659,14 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     showStatus("Failed to start live view.")
                 }
+
+                // Instantiate mediaManager
+                mediaManager = MediaManager(
+                    context = this@MainActivity,
+                    cameraController = cameraController,
+                    imageViewLivePreview = imageView,
+                    resumeLiveViewCallback = { restartLiveView() }
+                )
 
                 // Make icons visible
                 findViewById<ImageView>(R.id.batteryIcon).visibility = View.VISIBLE
@@ -844,7 +872,7 @@ class MainActivity : AppCompatActivity() {
 
     // Function to update the appearance of the capture button
     private fun updateCaptureButton() {
-        // Clear listeners and cancel any existing timer job
+        // Reset listeners and timer job
         btnCapture.setOnClickListener(null)
         btnCapture.setOnLongClickListener(null)
         captureTimerJob?.cancel()
@@ -852,134 +880,281 @@ class MainActivity : AppCompatActivity() {
 
         if (isBulbMode) {
             if (isBulbCapturing) {
-                // Bulb exposure is active
-                if (bulbDurationMs > 0) {
-                    // Timer set - show Stop button and countdown remaining time
-                    btnCapture.text = "Stop Bulb"
-                    btnCapture.applySmartTint(android.R.color.holo_red_dark)
-
-                    captureTimerJob = mainScope.launch {
-                        val startTime = System.currentTimeMillis()
-                        while (isBulbCapturing) {
-                            val elapsed = System.currentTimeMillis() - startTime
-                            val remaining = bulbDurationMs - elapsed
-                            if (remaining <= 0) break
-                            btnCapture.text = "Stop (" + formatElapsedTime(remaining) + ")"
-                            delay(250)
-                        }
-                    }
-                } else {
-                    // No timer set - show elapsed time since exposure started, button red, stops on click
-                    btnCapture.applySmartTint(android.R.color.holo_red_dark)
-                    captureTimerJob = mainScope.launch {
-                        val startTime = System.currentTimeMillis()
-                        while (isBulbCapturing) {
-                            val elapsed = System.currentTimeMillis() - startTime
-                            btnCapture.text = "Stop (" + formatElapsedTime(elapsed) + ")"
-                            delay(250)
-                        }
-                    }
-                }
-
-                // Stop bulb exposure on button click
-                btnCapture.setOnClickListener {
-                    mainScope.launch {
-                        val stopped = stopBulbExposure()
-                        if (stopped) {
-                            showStatus("Captured photo")
-                            resetAFButtonHighlight()
-                            isAutoFocusEngaged = false
-                        } else {
-                            showStatus("Failed to stop bulb exposure")
-                        }
-                        updateCaptureButton()
-                    }
-                }
-
+                updateCaptureButtonDuringBulbExposure()
             } else {
-                // Bulb not capturing - show start button
-                btnCapture.text = "Start Bulb"
-                btnCapture.applySmartTint()
-
-                btnCapture.setOnClickListener {
-                    mainScope.launch {
-                        val started = startBulbExposure()
-                        if (!started) {
-                            showStatus("Failed to start bulb exposure")
-                            return@launch
-                        }
-
-                        if (bulbDurationMs > 0) {
-                            // Auto-stop after timer, show countdown
-                            captureTimerJob = launch {
-                                val startTime = System.currentTimeMillis()
-                                var millisLeft = bulbDurationMs
-                                while (millisLeft > 0 && isBulbCapturing) {
-                                    btnCapture.text = "Stop (" + formatElapsedTime(millisLeft) + ")"
-                                    btnCapture.applySmartTint(android.R.color.holo_red_dark)
-                                    delay(250)
-                                    millisLeft = bulbDurationMs - (System.currentTimeMillis() - startTime)
-                                }
-                            }
-
-                            delay(bulbDurationMs)
-
-                            val stopped = stopBulbExposure()
-                            captureTimerJob?.cancel()
-                            captureTimerJob = null
-
-                            if (stopped) {
-                                showStatus("Captured photo")
-                                resetAFButtonHighlight()
-                                isAutoFocusEngaged = false
-                            } else {
-                                showStatus("Failed to stop bulb exposure")
-                            }
-                            updateCaptureButton()
-
-                        } else {
-                            // No timer set, just update to show elapsed time until stopped manually
-                            updateCaptureButton()
-                        }
-                    }
-                }
-            }
-
-            btnCapture.setOnLongClickListener {
-                showTimerSetupDialog()
-                true
+                updateCaptureButtonBeforeBulbExposure()
             }
         } else {
-            // Not bulb mode - normal capture button with possible countdown
+            updateCaptureButtonNormalMode()
+        }
+    }
 
-            btnCapture.text = "Capture"
-            btnCapture.applySmartTint()
-            btnCapture.setOnLongClickListener(null)
+    // --- Bulb exposure active state ---
+    private fun updateCaptureButtonDuringBulbExposure() {
+        if (bulbDurationMs > 0) {
+            startBulbCountdown()
+        } else {
+            btnCapture.applySmartTint(android.R.color.holo_red_dark)
+            startBulbElapsedTimer()
+        }
 
-            btnCapture.setOnClickListener {
-                mainScope.launch {
-                    val shutterDurationMs = cameraController.currentShutterDurationMs ?: 0L
-                    Log.d("CaptureButton", "Clicked, shutterDurationMs=$shutterDurationMs")
+        btnCapture.setOnClickListener {
+            mainScope.launch {
+                btnCapture.applySmartTint()
+                val result = stopBulbExposure()
+                handleCaptureResult(result)
+                updateCaptureButton()
+            }
+        }
+    }
 
-                    if (shutterDurationMs > 1000) {
-                        performTimedCapture(shutterDurationMs)
-                    } else {
-                        val success = cameraController.captureStill()
-                        btnCapture.text = "Capture"
-                        btnCapture.applySmartTint()
+    // --- Bulb exposure inactive state ---
+    private fun updateCaptureButtonBeforeBulbExposure() {
+        btnCapture.text = "Start Bulb"
+        btnCapture.applySmartTint()
 
-                        if (success) {
-                            showStatus("Captured photo")
-                            resetAFButtonHighlight()
-                            isAutoFocusEngaged = false
-                        } else {
-                            showStatus("Failed to capture photo")
-                        }
-                    }
+        btnCapture.setOnClickListener {
+            mainScope.launch {
+                val started = startBulbExposure()
+                if (!started) {
+                    showStatus("Failed to start bulb exposure")
+                    return@launch
+                }
+
+                if (bulbDurationMs > 0) {
+                    startBulbCountdown()
+                    delay(bulbDurationMs)
+                    val result = stopBulbExposure()
+                    handleCaptureResult(result)
+                    updateCaptureButton()
+                } else {
+                    btnCapture.applySmartTint(android.R.color.holo_red_dark)
+                    updateCaptureButton()
+                }
+            }
+        }
+
+        btnCapture.setOnLongClickListener {
+            showTimerSetupDialog()
+            true
+        }
+    }
+
+    // --- Normal capture mode ---
+    private fun updateCaptureButtonNormalMode() {
+        btnCapture.text = "Capture"
+        btnCapture.applySmartTint()
+        btnCapture.setOnLongClickListener(null)
+
+        btnCapture.setOnClickListener {
+            mainScope.launch {
+                val shutterDurationMs = cameraController.currentShutterDurationMs ?: 0L
+                cameraController.stopMjpegStream()
+                if (shutterDurationMs > 1000) {
+                    performTimedCapture(shutterDurationMs)
+                } else {
+                    val result = cameraController.captureStill()
+                    btnCapture.text = "Capture"
+                    btnCapture.applySmartTint()
+                    handleCaptureResult(result)
                 }
             }
         }
     }
+
+    // --- Bulb mode countdown timer ---
+    private fun startBulbCountdown() {
+        captureTimerJob = mainScope.launch {
+            val startTime = System.currentTimeMillis()
+            var millisLeft = bulbDurationMs
+            while (millisLeft > 0 && isBulbCapturing) {
+                btnCapture.text = "Stop (" + formatElapsedTime(millisLeft) + ")"
+                btnCapture.applySmartTint(android.R.color.holo_red_dark)
+                delay(250)
+                millisLeft = bulbDurationMs - (System.currentTimeMillis() - startTime)
+            }
+        }
+    }
+
+    // --- Bulb mode elapsed timer (no fixed duration) ---
+    private fun startBulbElapsedTimer() {
+        captureTimerJob = mainScope.launch {
+            val startTime = System.currentTimeMillis()
+            while (isBulbCapturing) {
+                val elapsed = System.currentTimeMillis() - startTime
+                btnCapture.text = "Stop (" + formatElapsedTime(elapsed) + ")"
+                delay(250)
+            }
+        }
+    }
+
+    // --- Process capture result from bulb exposure ---
+    private suspend fun handleCaptureResult(result: CameraController.CaptureResult) {
+        if (result.success && result.imageUrls.isNotEmpty()) {
+            val mediaInfo = buildMediaInfoFromUrls(result.imageUrls)
+            if (mediaInfo != null) {
+                mediaManager.onPhotoCaptured(mediaInfo)
+            }
+            showStatus("Captured photo")
+            resetAFButtonHighlight()
+            isAutoFocusEngaged = false
+        } else {
+            showStatus("Failed to capture photo")
+        }
+    }
+
+    // Helper to build a MediaInfo object for mediaManager
+    private fun buildMediaInfoFromUrls(urls: List<String>): MediaInfo? {
+        if (urls.isEmpty()) return null
+        val firstUrl = urls.first()
+        val filename = firstUrl
+            .substringAfterLast("/")
+            .substringBefore("?")
+        return MediaInfo(
+            previewUrl = firstUrl,   // or a specific preview URL if you have one
+            fullImageUrl = firstUrl, // assuming preview and full image are same URL here
+            filename = filename,
+            isVideo = false          // adjust if your URLs correspond to video
+        )
+    }
+
+//    private fun updateCaptureButton() {
+//        // Clear listeners and cancel any existing timer job
+//        btnCapture.setOnClickListener(null)
+//        btnCapture.setOnLongClickListener(null)
+//        captureTimerJob?.cancel()
+//        captureTimerJob = null
+//
+//        if (isBulbMode) {
+//            if (isBulbCapturing) {
+//                // Bulb exposure is active
+//                if (bulbDurationMs > 0) {
+//                    // Timer set - show Stop button and countdown remaining time
+//                    btnCapture.text = "Stop Bulb"
+//                    btnCapture.applySmartTint(android.R.color.holo_red_dark)
+//
+//                    captureTimerJob = mainScope.launch {
+//                        val startTime = System.currentTimeMillis()
+//                        while (isBulbCapturing) {
+//                            val elapsed = System.currentTimeMillis() - startTime
+//                            val remaining = bulbDurationMs - elapsed
+//                            if (remaining <= 0) break
+//                            btnCapture.text = "Stop (" + formatElapsedTime(remaining) + ")"
+//                            delay(250)
+//                        }
+//                    }
+//                } else {
+//                    // No timer set - show elapsed time since exposure started, button red, stops on click
+//                    btnCapture.applySmartTint(android.R.color.holo_red_dark)
+//                    captureTimerJob = mainScope.launch {
+//                        val startTime = System.currentTimeMillis()
+//                        while (isBulbCapturing) {
+//                            val elapsed = System.currentTimeMillis() - startTime
+//                            btnCapture.text = "Stop (" + formatElapsedTime(elapsed) + ")"
+//                            delay(250)
+//                        }
+//                    }
+//                }
+//
+//                // Stop bulb exposure on button click
+//                btnCapture.setOnClickListener {
+//                    mainScope.launch {
+//                        val stopped = stopBulbExposure()
+//                        if (stopped) {
+//                            showStatus("Captured photo")
+//                            resetAFButtonHighlight()
+//                            isAutoFocusEngaged = false
+//                        } else {
+//                            showStatus("Failed to stop bulb exposure")
+//                        }
+//                        updateCaptureButton()
+//                    }
+//                }
+//
+//            } else {
+//                // Bulb not capturing - show start button
+//                btnCapture.text = "Start Bulb"
+//                btnCapture.applySmartTint()
+//
+//                btnCapture.setOnClickListener {
+//                    mainScope.launch {
+//                        val started = startBulbExposure()
+//                        if (!started) {
+//                            showStatus("Failed to start bulb exposure")
+//                            return@launch
+//                        }
+//
+//                        if (bulbDurationMs > 0) {
+//                            // Auto-stop after timer, show countdown
+//                            captureTimerJob = launch {
+//                                val startTime = System.currentTimeMillis()
+//                                var millisLeft = bulbDurationMs
+//                                while (millisLeft > 0 && isBulbCapturing) {
+//                                    btnCapture.text = "Stop (" + formatElapsedTime(millisLeft) + ")"
+//                                    btnCapture.applySmartTint(android.R.color.holo_red_dark)
+//                                    delay(250)
+//                                    millisLeft = bulbDurationMs - (System.currentTimeMillis() - startTime)
+//                                }
+//                            }
+//
+//                            delay(bulbDurationMs)
+//
+//                            val stopped = stopBulbExposure()
+//                            captureTimerJob?.cancel()
+//                            captureTimerJob = null
+//
+//                            if (stopped) {
+//                                showStatus("Captured photo")
+//                                resetAFButtonHighlight()
+//                                isAutoFocusEngaged = false
+//                            } else {
+//                                showStatus("Failed to stop bulb exposure")
+//                            }
+//                            updateCaptureButton()
+//
+//                        } else {
+//                            // No timer set, just update to show elapsed time until stopped manually
+//                            updateCaptureButton()
+//                        }
+//                    }
+//                }
+//            }
+//
+//            btnCapture.setOnLongClickListener {
+//                showTimerSetupDialog()
+//                true
+//            }
+//        } else {
+//            // Not bulb mode - normal capture button with possible countdown
+//
+//            btnCapture.text = "Capture"
+//            btnCapture.applySmartTint()
+//            btnCapture.setOnLongClickListener(null)
+//
+//            btnCapture.setOnClickListener {
+//                mainScope.launch {
+//                    val shutterDurationMs = cameraController.currentShutterDurationMs ?: 0L
+//                    Log.d("CaptureButton", "Clicked, shutterDurationMs=$shutterDurationMs")
+//
+//                    if (shutterDurationMs > 1000) {
+//                        performTimedCapture(shutterDurationMs)
+//                    } else {
+//                        val success = cameraController.captureStill()
+//                        btnCapture.text = "Capture"
+//                        btnCapture.applySmartTint()
+//
+//                        if (success) {
+//                            showStatus("Captured photo")
+//                            resetAFButtonHighlight()
+//                            isAutoFocusEngaged = false
+//                        } else {
+//                            showStatus("Failed to capture photo")
+//                        }
+//                    }
+//                }
+//            }
+//        }
+//    }
 
     // Helper function to perform timed captures
     fun performTimedCapture(durationMs: Long) {
@@ -999,14 +1174,19 @@ class MainActivity : AppCompatActivity() {
                 } while (timeLeft > 0)
             }
 
-            val success = cameraController.captureStill()
+            val result: CaptureResult = cameraController.captureStill()
 
             countdownJob.cancel()
             captureTimerJob = null
             btnCapture.text = "Capture"
             btnCapture.applySmartTint()
 
-            if (success) {
+            if (result.success) {
+                // Build MediaInfo from URLs
+                val mediaInfo = buildMediaInfoFromUrls(result.imageUrls)
+                mediaInfo?.let {
+                    mediaManager.onPhotoCaptured(it)
+                }
                 showStatus("Captured photo")
                 resetAFButtonHighlight()
                 isAutoFocusEngaged = false
@@ -1101,42 +1281,42 @@ class MainActivity : AppCompatActivity() {
     }
 
     // Suspend function to stop bulb exposure and restart live view
-    suspend fun stopBulbExposure(): Boolean {
-        if (!isBulbCapturing) return true // Already stopped, treat as success
+    suspend fun stopBulbExposure(): CaptureResult {
+        if (!isBulbCapturing) return CaptureResult(true)
 
-        val stopped = cameraController.stopBulbExposure()
+        val result = cameraController.stopBulbExposure()
         isBulbCapturing = false
         updateCaptureButton()
 
-        if (stopped) {
+        if (result.success) {
             showStatus("Bulb exposure stopped")
 
             try {
                 showStatus("Waiting for camera to become idle...")
                 cameraController.waitForIdleStatus()
 
-                showStatus("Camera idle. Restarting live view...")
+                showStatus("Camera idle. Processing...")
 
-                val liveViewUrl = cameraController.startLiveView()
-                if (liveViewUrl != null) {
-                    showStatus("Live view resumed.")
-                    liveViewImageView?.let { imageView ->
-                        cameraController.stopMjpegStream()
-                        cameraController.startMjpegStream(liveViewUrl, imageView)
-                    }
-                } else {
-                    showStatus("Failed to restart live view.")
-                    Log.e(TAG, "startLiveView returned null URL after bulb exposure")
-                }
+//                val liveViewUrl = cameraController.startLiveView()
+//                if (liveViewUrl != null) {
+//                    showStatus("Live view resumed.")
+//                    liveViewImageView?.let { imageView ->
+//                        cameraController.startMjpegStream(liveViewUrl, imageView)
+//                    }
+//                } else {
+//                    showStatus("Failed to restart live view.")
+//                    Log.e(TAG, "startLiveView returned null URL after bulb exposure")
+//                }
 
             } catch (e: TimeoutException) {
                 Log.e(TAG, "Camera did not return to IDLE in time", e)
-                showStatus("Live view failed to resume (timeout).")
+//                showStatus("Live view failed to resume (timeout).")
             }
         } else {
             showStatus("Failed to stop bulb exposure")
         }
-        return stopped
+
+        return result
     }
 
     // Timer dialog - shows up when "Start Bulb" is long-pressed
@@ -1474,6 +1654,30 @@ class MainActivity : AppCompatActivity() {
 
         // Android default disabled alpha is ~0.38
         return ColorUtils.setAlphaComponent(baseColor, (255 * 0.38f).toInt())
+    }
+
+    // Function to restart a live feed to the app
+    fun restartLiveView() {
+        lifecycleScope.launch {
+            showStatus("Restarting live view...")
+
+            val view = liveViewImageView
+            if (view == null) {
+                showStatus("Error: live view image view is not initialized")
+                Log.e("MainActivity", "liveViewImageView is null in restartLiveView()")
+                return@launch
+            }
+
+            val liveViewUrl = cameraController.startLiveView()
+            if (liveViewUrl != null) {
+                cameraController.startMjpegStream(liveViewUrl, view)
+                showStatus("Live view resumed.")
+                enableTouchAF(true)
+                collectfocusstatusflow()
+            } else {
+                showStatus("Failed to resume live view.")
+            }
+        }
     }
 
     // Shows a status message on screen and logs it.

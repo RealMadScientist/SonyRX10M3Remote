@@ -46,7 +46,7 @@ class CameraController(baseUrl: String) {
 
     // Posts JSON string to the camera API and returns the response body string or null if failed.
     private suspend fun postJson(jsonBody: String): String? = withContext(Dispatchers.IO) {
-        Log.d(TAG, "POST JSON body:\n$jsonBody")
+//        Log.d(TAG, "POST JSON body:\n$jsonBody")
         try {
             val body = RequestBody.create(jsonMediaType, jsonBody)
             val request = Request.Builder()
@@ -60,7 +60,7 @@ class CameraController(baseUrl: String) {
                     return@withContext null
                 }
                 val responseBody = response.body?.string()
-                Log.d(TAG, "POST response body: $responseBody")
+//                Log.d(TAG, "POST response body: $responseBody")
                 return@withContext responseBody
             }
         } catch (e: Exception) {
@@ -87,38 +87,6 @@ class CameraController(baseUrl: String) {
         } catch (e: Exception) {
             Log.e(TAG, "JSON parse error for $method: ${e.localizedMessage}")
             null
-        }
-    }
-
-    suspend fun downloadImage(url: String, filename: String): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val connection = URL(url).openConnection()
-            connection.connect()
-            val inputStream = connection.getInputStream()
-            val buffer = ByteArray(8 * 1024)
-
-            // Directory in external storage Pictures folder
-            val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-            if (!picturesDir.exists()) picturesDir.mkdirs()
-
-            val imageFile = File(picturesDir, filename)
-            val outputStream = FileOutputStream(imageFile)
-
-            var bytesRead: Int
-            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                outputStream.write(buffer, 0, bytesRead)
-            }
-
-            outputStream.flush()
-            outputStream.close()
-            inputStream.close()
-
-            // Optionally, notify MediaStore about the new file here if you want it to appear immediately in Gallery
-
-            true
-        } catch (e: Exception) {
-            e.printStackTrace()
-            false
         }
     }
 
@@ -326,47 +294,63 @@ class CameraController(baseUrl: String) {
         return response?.optJSONArray("result") != null
     }
 
+    data class CaptureResult(
+        val success: Boolean,
+        val imageUrls: List<String> = emptyList()
+    )
+
     /**
      * Takes a picture in still mode.
      * Ensures camera is in remote shooting and still shoot mode before capture.
      */
-    suspend fun captureStill(): Boolean {
+    suspend fun captureStill(): CaptureResult {
         _isCapturing = true
         try {
-            // Only change shoot mode if it's not already in "still"
             val currentMode = getShootMode()
             if (currentMode != "still") {
                 val modeResult = setShootMode("still")
                 if (!modeResult) {
                     Log.e(TAG, "Failed to set shoot mode to still")
-                    return false
+                    return CaptureResult(false)
                 }
             }
 
-            // Now capture the image
             val resp = callMethod("actTakePicture")
             if (resp == null) {
                 Log.e(TAG, "actTakePicture: null response")
-                return false
+                return CaptureResult(false)
             }
 
             val resultArray = resp.optJSONArray("result")
             if (resultArray != null && resultArray.length() > 0) {
-                Log.d(TAG, "Image capture success: $resultArray")
-                return true
+                val urls = mutableListOf<String>()
+                val firstElement = resultArray.opt(0)
+                if (firstElement is JSONArray) {
+                    // Nested array detected, unwrap it
+                    val innerArray = firstElement
+                    for (i in 0 until innerArray.length()) {
+                        urls.add(innerArray.optString(i))
+                    }
+                } else {
+                    // Normal single array
+                    for (i in 0 until resultArray.length()) {
+                        urls.add(resultArray.optString(i))
+                    }
+                }
+                Log.d(TAG, "Image capture success: $urls")
+                return CaptureResult(true, urls)
             }
+
             Log.e(TAG, "Image capture failed: empty result")
-            return false
+            return CaptureResult(false)
 
         } catch (e: Exception) {
             Log.e(TAG, "Error in captureStill: ${e.localizedMessage}")
-            return false
-
+            return CaptureResult(false)
         } finally {
             _isCapturing = false
         }
     }
-
 
     // Helper to get a camera setting value by method name.
     private suspend fun getSetting(method: String): String? {
@@ -470,15 +454,44 @@ class CameraController(baseUrl: String) {
     }
 
     // Stops bulb exposure shot.
-    suspend fun stopBulbExposure(): Boolean {
-        val response = callMethod("stopBulbShooting")
-        return if (response?.has("result") == true) {
-            Log.d(TAG, "stopBulbShooting succeeded.")
-            true
-        } else {
-            Log.e(TAG, "stopBulbShooting failed: $response")
-            false
+    suspend fun stopBulbExposure(): CaptureResult {
+        val resp = callMethod("stopBulbShooting")
+        if (resp == null) {
+            Log.e(TAG, "stopBulbShooting: null response")
+            return CaptureResult(false)
         }
+
+        // Stop bulb shooting might not immediately return URLs, so just log and proceed
+        Log.d(TAG, "stopBulbShooting called successfully.")
+
+        // Now wait for the picture(s) to be ready and get URLs
+        val awaitResult = awaitTakePicture()
+
+        if (awaitResult.success) {
+            Log.d(TAG, "awaitTakePicture success: ${awaitResult.imageUrls}")
+        } else {
+            Log.e(TAG, "awaitTakePicture failed to get image URLs")
+        }
+
+        return awaitResult
+    }
+
+    suspend fun awaitTakePicture(): CaptureResult {
+        val response = callMethod("awaitTakePicture") ?: return CaptureResult(false, emptyList())
+
+        // The API response result array looks like: [ [ "url1", "url2", ... ] ]
+        val resultArray = response.optJSONArray("result") ?: return CaptureResult(false, emptyList())
+
+        if (resultArray.length() == 0) return CaptureResult(false, emptyList())
+
+        val urlListJson = resultArray.optJSONArray(0) ?: return CaptureResult(false, emptyList())
+
+        val urls = mutableListOf<String>()
+        for (i in 0 until urlListJson.length()) {
+            urls.add(urlListJson.optString(i))
+        }
+
+        return CaptureResult(true, urls)
     }
 
     // Starts video recording.
