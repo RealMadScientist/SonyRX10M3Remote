@@ -48,7 +48,7 @@ I have no intention to maintain or officially support this app for others, but I
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/yourusername/your-repo-name.git
+   git clone https://github.com/RealMadScientist/SonyRX10M3Remote.git
    ```
 
 2. Open the project in Android Studio.  
