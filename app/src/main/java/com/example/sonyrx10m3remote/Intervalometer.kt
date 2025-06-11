@@ -6,6 +6,12 @@ import org.json.JSONObject
 import org.json.JSONArray
 import java.util.concurrent.TimeoutException
 
+/**
+ * Intervalometer handles both burst (continuous) and interval shooting modes.
+ *
+ * It manages coroutine lifecycle for shooting sequences,
+ * updates UI via callbacks, and interacts with the CameraController.
+ */
 class Intervalometer(
     private val cameraController: CameraController,
     private val onStatusUpdate: (String) -> Unit,
@@ -19,16 +25,23 @@ class Intervalometer(
     private val onProgressUpdate: (Int, Int?) -> Unit
 ) {
     private val TAG = "Intervalometer"
+
+    // Job for the shooting coroutine, to control cancellation
     private var job: Job? = null
+
+    // Flag indicating if intervalometer is currently running
     private var isRunning = false
 
     /**
-     * Maps slider value to interval in milliseconds:
-     *  0           → burst (continuous shooting)
-     *  1..20       → 0.5s steps (0.5…10 s)
-     * 21..70       → 1s steps (10…60 s)
-     * 71..88      → 30s steps (1…10 min)
-     * 89..108      → 60s steps (10…30 min)
+     * Converts a slider value to interval duration in milliseconds.
+     *
+     * Mapping ranges:
+     * - 0         → burst (continuous shooting)
+     * - 1..20     → 0.5s steps (0.5 to 10 seconds)
+     * - 21..70    → 1s steps (10 to 60 seconds)
+     * - 71..88    → 30s steps (1 to 10 minutes)
+     * - 89..107   → 60s steps (10 to 30 minutes)
+     * - else      → 30 minutes (1,800,000 ms)
      */
     fun getIntervalFromSlider(value: Int): Long = when {
         value == 0          -> 0L
@@ -39,18 +52,33 @@ class Intervalometer(
         else                -> 1_800_000L
     }
 
+    /**
+     * Converts a slider value to total number of shots.
+     *
+     * Mapping ranges:
+     * - 0..19    → value + 1
+     * - 20..35   → 5 * (value - 15)
+     * - 36..55   → 20 * (value - 30)
+     * - 56..86   → 100 * (value - 50)
+     * - else     → null (infinite shots)
+     */
     fun getTotalShotsFromSlider(value: Int): Int? = when {
         value in  0..19     -> value + 1
         value in 20..35     -> 5 * (value - 15)
         value in 36..55     -> 20 * (value - 30)
-        value in 56..86    -> 100 * (value - 50)
+        value in 56..86     -> 100 * (value - 50)
         else                -> null
     }
 
     /**
-     * Start shooting:
-     *  - if intervalMs == 0 → configure continuous mode and trigger one burst command
-     *  - otherwise → single-shot at each interval
+     * Starts the intervalometer with specified interval and total shots.
+     *
+     * If intervalMs == 0, burst mode (continuous shooting) is used.
+     * Otherwise, single shots are taken at each interval.
+     *
+     * @param intervalMs Interval between shots in milliseconds
+     * @param totalShots Number of shots to take (null for infinite)
+     * @param contShootingMode Continuous shooting mode name (default "Continuous")
      */
     fun start(intervalMs: Long, totalShots: Int?, contShootingMode: String = "Continuous") {
         if (isRunning) {
@@ -59,204 +87,21 @@ class Intervalometer(
         }
         isRunning = true
 
-        fun findStorageInfo(results: JSONArray): JSONObject? {
-            for (i in 0 until results.length()) {
-                val obj = results.opt(i)
-                when (obj) {
-                    is JSONObject -> {
-                        if (obj.optString("type") == "storageInformation") {
-                            return obj
-                        }
-                        val keys = obj.keys()
-                        while (keys.hasNext()) {
-                            val key = keys.next()
-                            val child = obj.opt(key)
-                            if (child is JSONArray) {
-                                val found = findStorageInfo(child)
-                                if (found != null) return found
-                            } else if (child is JSONObject) {
-                                if (child.optString("type") == "storageInformation") return child
-                            }
-                        }
-                    }
-                    is JSONArray -> {
-                        val found = findStorageInfo(obj)
-                        if (found != null) return found
-                    }
-                }
-            }
-            return null
-        }
-
+        // Launch the main shooting coroutine on background thread
         job = CoroutineScope(Dispatchers.Default).launch {
             if (intervalMs == 0L) {
-                // ── Burst mode ──
-
-                val shutterSpeed = getShutterSpeed()
-                if (shutterSpeed == "BULB") {
-                    onStatusUpdate("Burst mode shooting cannot be used with bulb shutter speed")
-                    stop()
-                    return@launch
-                }
-
-                onStatusUpdate("Starting burst mode shooting")
-
-                if (!cameraController.setShootMode("still")) {
-                    onStatusUpdate("Failed to set shoot mode to 'still'")
-                    stop()
-                    return@launch
-                }
-
-                if (!cameraController.setContShootingMode(contShootingMode)) {
-                    onStatusUpdate("Failed to set continuous shooting mode")
-                    stop()
-                    return@launch
-                }
-
-                val info = cameraController.getInfo()
-                val resultsStart = info?.optJSONArray("result")
-                val storageInfoStart = resultsStart?.let { findStorageInfo(it) }
-                val initialStorageCount = storageInfoStart?.optInt("numberOfRecordableImages", -1) ?: -1
-                if (initialStorageCount < 0) {
-                    onStatusUpdate("Failed to get initial storage count")
-                    stop()
-                    return@launch
-                }
-
-                if (!cameraController.startContinuousShooting()) {
-                    onStatusUpdate("Failed to start burst")
-                    stop()
-                    return@launch
-                }
-
-                onStatusUpdate("Continuous shooting started")
-
-                var shotsTaken = 0
-                while (isActive) {
-                    val evt = cameraController.getEventLongPoll() ?: continue
-                    val results = evt.optJSONArray("result") ?: continue
-                    val storageInfo = findStorageInfo(results)
-                    val currentStorageCount = storageInfo?.optInt("numberOfRecordableImages", -1) ?: -1
-                    if (currentStorageCount < 0) continue
-
-                    shotsTaken = initialStorageCount - currentStorageCount
-                    onProgressUpdate(shotsTaken, totalShots)
-
-                    if (totalShots != null && shotsTaken >= totalShots) {
-                        onStatusUpdate("Reached target shots, stopping burst")
-                        break
-                    }
-
-                    if (currentStorageCount == 0) {
-                        onStatusUpdate("Storage full, stopping burst")
-                        break
-                    }
-                }
-
-                stop()
-
+                // Burst mode (continuous shooting)
+                runBurstMode(totalShots, contShootingMode)
             } else {
-                // ── Interval mode ──
-                onStatusUpdate("Starting interval shooting every ${intervalMs / 1000.0} s, total shots: ${totalShots ?: "∞"}")
-                cameraController.setShootMode("still")
-
-                if (totalShots == null) {
-                    var shotCount = 0
-                    while (isActive) {
-                        val shutterSpeed = getShutterSpeed()
-
-                        val elapsed = measureTimeMillis {
-                            if (shutterSpeed == "BULB") {
-                                val bulbDuration = getBulbDurationMs()
-                                if (bulbDuration <= 0L) {
-                                    onError("Bulb duration cannot be zero or negative")
-                                    stop()
-                                    return@launch
-                                }
-
-                                val started = startBulb()
-                                if (!started) {
-                                    onStatusUpdate("Failed to start bulb exposure, stopping intervalometer")
-                                    stop()
-                                    return@launch
-                                }
-                                delay(bulbDuration)
-                                val stopped = stopBulb()
-                                if (!stopped) {
-                                    onStatusUpdate("Failed to stop bulb exposure cleanly")
-                                }
-                            } else {
-                                val shutterDurationMs = cameraController.currentShutterDurationMs ?: 0L
-                                if (shutterDurationMs > 1000L) {
-                                    performTimedCapture(shutterDurationMs)
-                                } else {
-                                    cameraController.takePicture()
-                                }
-                            }
-                            shotCount++
-                            onProgressUpdate(shotCount, null)
-                        }
-
-                        if (elapsed > intervalMs) {
-                            onStatusUpdate("⚠ Shot took ${elapsed} ms, longer than interval (${intervalMs} ms)")
-                            delay(0)
-                        } else {
-                            delay(intervalMs - elapsed)
-                        }
-                    }
-                } else {
-                    repeat(totalShots.toInt()) { i ->
-                        if (!isActive) return@repeat
-
-                        val shutterSpeed = getShutterSpeed()
-
-                        val elapsed = measureTimeMillis {
-                            if (shutterSpeed == "BULB") {
-                                val bulbDuration = getBulbDurationMs()
-                                if (bulbDuration <= 0L) {
-                                    onError("Bulb duration cannot be zero or negative")
-                                    stop()
-                                    return@repeat
-                                }
-
-                                val started = startBulb()
-                                if (!started) {
-                                    onStatusUpdate("Failed to start bulb exposure, stopping intervalometer")
-                                    stop()
-                                    return@repeat
-                                }
-                                delay(bulbDuration)
-                                val stopped = stopBulb()
-                                if (!stopped) {
-                                    onStatusUpdate("Failed to stop bulb exposure cleanly")
-                                }
-                            } else {
-                                val shutterDurationMs = cameraController.currentShutterDurationMs ?: 0L
-                                if (shutterDurationMs > 1000L) {
-                                    performTimedCapture(shutterDurationMs)
-                                } else {
-                                    cameraController.takePicture()
-                                }
-                            }
-                            onProgressUpdate(i + 1, totalShots)
-                        }
-
-                        if (elapsed > intervalMs) {
-                            onStatusUpdate("⚠ Shot took ${elapsed} ms, longer than interval (${intervalMs} ms)")
-                            delay(0)
-                        } else {
-                            delay(intervalMs - elapsed)
-                        }
-                    }
-                    stop()
-                }
+                // Interval shooting mode
+                runIntervalMode(intervalMs, totalShots)
             }
         }
     }
 
     /**
-     * Stop either burst or interval shooting.
-     * Cancels the coroutine and resets mode.
+     * Stops shooting gracefully.
+     * Cancels shooting coroutine and resets camera modes.
      */
     fun stop() {
         if (!isRunning) {
@@ -264,6 +109,7 @@ class Intervalometer(
             return
         }
 
+        // Run stop operations on a background coroutine
         CoroutineScope(Dispatchers.Default).launch {
             val stopped = cameraController.stopContinuousShooting()
             if (!stopped) {
@@ -274,18 +120,18 @@ class Intervalometer(
 
             onStatusUpdate("Waiting for camera to become idle...")
             try {
-                cameraController.waitForIdleStatus(timeoutMillis = 30000)
+                cameraController.waitForIdleStatus(timeoutMillis = 30_000)
             } catch (e: TimeoutException) {
                 onStatusUpdate("Warning: camera did not become idle within timeout")
             }
 
-            val contModeReset = cameraController.setContShootingMode("Single")
-            if (!contModeReset) {
+            // Reset continuous shooting mode to 'Single'
+            if (!cameraController.setContShootingMode("Single")) {
                 onStatusUpdate("Warning: Failed to reset continuous shooting mode to 'Single'")
             }
 
-            val shootModeReset = cameraController.setShootMode("still")
-            if (!shootModeReset) {
+            // Reset shoot mode to 'still'
+            if (!cameraController.setShootMode("still")) {
                 onStatusUpdate("Warning: Failed to set shoot mode to 'still'")
             }
 
@@ -298,6 +144,239 @@ class Intervalometer(
         }
     }
 
-    /** Whether the intervalometer is active right now. */
+    /**
+     * Whether the intervalometer is active right now.
+     */
     fun isRunning() = isRunning
+
+
+    /* -------------------- Private helper functions -------------------- */
+
+    /**
+     * Recursively searches a JSONArray for a JSONObject with "type" == "storageInformation".
+     *
+     * Used to parse camera info and event JSON to find storage details.
+     *
+     * @param array JSONArray to search in
+     * @return JSONObject with storage information or null if not found
+     */
+    private fun findStorageInfo(array: JSONArray): JSONObject? {
+        for (i in 0 until array.length()) {
+            val obj = array.opt(i)
+            when (obj) {
+                is JSONObject -> {
+                    if (obj.optString("type") == "storageInformation") {
+                        return obj
+                    }
+                    val keys = obj.keys()
+                    while (keys.hasNext()) {
+                        val key = keys.next()
+                        val child = obj.opt(key)
+                        when (child) {
+                            is JSONArray -> {
+                                val found = findStorageInfo(child)
+                                if (found != null) return found
+                            }
+                            is JSONObject -> {
+                                if (child.optString("type") == "storageInformation") return child
+                            }
+                        }
+                    }
+                }
+                is JSONArray -> {
+                    val found = findStorageInfo(obj)
+                    if (found != null) return found
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Runs burst (continuous) shooting mode.
+     *
+     * Continuously polls for shot events and tracks shot count.
+     * Stops on reaching target shots or storage full.
+     *
+     * @param totalShots Optional max number of shots
+     * @param contShootingMode Continuous shooting mode to set
+     */
+    private suspend fun CoroutineScope.runBurstMode(totalShots: Int?, contShootingMode: String) {
+        val shutterSpeed = getShutterSpeed()
+        if (shutterSpeed == "BULB") {
+            onStatusUpdate("Burst mode shooting cannot be used with bulb shutter speed")
+            stop()
+            return
+        }
+
+        onStatusUpdate("Starting burst mode shooting")
+
+        if (!cameraController.setShootMode("still")) {
+            onStatusUpdate("Failed to set shoot mode to 'still'")
+            stop()
+            return
+        }
+
+        if (!cameraController.setContShootingMode(contShootingMode)) {
+            onStatusUpdate("Failed to set continuous shooting mode")
+            stop()
+            return
+        }
+
+        val info = cameraController.getInfo()
+        val resultsStart = info?.optJSONArray("result")
+        val storageInfoStart = resultsStart?.let { findStorageInfo(it) }
+        val initialStorageCount = storageInfoStart?.optInt("numberOfRecordableImages", -1) ?: -1
+        if (initialStorageCount < 0) {
+            onStatusUpdate("Failed to get initial storage count")
+            stop()
+            return
+        }
+
+        if (!cameraController.startContinuousShooting()) {
+            onStatusUpdate("Failed to start burst")
+            stop()
+            return
+        }
+
+        onStatusUpdate("Continuous shooting started")
+
+        var shotsTaken = 0
+
+        // Loop while coroutine is active
+        while (isActive) {
+            val evt = cameraController.getEventLongPoll() ?: continue
+            val results = evt.optJSONArray("result") ?: continue
+            val storageInfo = findStorageInfo(results)
+            val currentStorageCount = storageInfo?.optInt("numberOfRecordableImages", -1) ?: -1
+            if (currentStorageCount < 0) continue
+
+            shotsTaken = initialStorageCount - currentStorageCount
+            onProgressUpdate(shotsTaken, totalShots)
+
+            // Stop if reached target shot count
+            if (totalShots != null && shotsTaken >= totalShots) {
+                onStatusUpdate("Reached target shots, stopping burst")
+                break
+            }
+
+            // Stop if storage is full
+            if (currentStorageCount == 0) {
+                onStatusUpdate("Storage full, stopping burst")
+                break
+            }
+        }
+
+        stop()
+    }
+
+    /**
+     * Runs interval shooting mode.
+     *
+     * If totalShots is null, shoots indefinitely until stopped.
+     * Handles bulb and normal shutter speeds.
+     *
+     * @param intervalMs Interval between shots in milliseconds
+     * @param totalShots Number of shots to take or null for infinite
+     */
+    private suspend fun CoroutineScope.runIntervalMode(intervalMs: Long, totalShots: Int?) {
+        onStatusUpdate("Starting interval shooting every ${intervalMs / 1000.0} s, total shots: ${totalShots ?: "∞"}")
+        cameraController.setShootMode("still")
+
+        if (totalShots == null) {
+            runInfiniteIntervalShooting(intervalMs)
+        } else {
+            runFiniteIntervalShooting(intervalMs, totalShots)
+            stop()
+        }
+    }
+
+    /**
+     * Runs interval shooting indefinitely until coroutine cancelled.
+     */
+    private suspend fun CoroutineScope.runInfiniteIntervalShooting(intervalMs: Long) {
+        var shotCount = 0
+        while (isActive) {
+            val elapsed = measureTimeMillis {
+                takeShotOrBulbExposure(shotCount + 1, null)
+            }
+
+            shotTimingDelay(intervalMs, elapsed)
+            shotCount++
+        }
+    }
+
+    /**
+     * Runs interval shooting for a fixed number of shots.
+     */
+    private suspend fun CoroutineScope.runFiniteIntervalShooting(intervalMs: Long, totalShots: Int) {
+        repeat(totalShots) { i ->
+            if (!isActive) return@repeat
+
+            val elapsed = measureTimeMillis {
+                takeShotOrBulbExposure(i + 1, totalShots)
+            }
+
+            shotTimingDelay(intervalMs, elapsed)
+        }
+    }
+
+    /**
+     * Performs a single shot, either bulb or normal.
+     *
+     * Updates progress and reports errors.
+     *
+     * @param shotNumber Current shot number
+     * @param totalShots Total shots or null if infinite
+     */
+    private suspend fun takeShotOrBulbExposure(shotNumber: Int, totalShots: Int?) {
+        val shutterSpeed = getShutterSpeed()
+
+        if (shutterSpeed == "BULB") {
+            val bulbDuration = getBulbDurationMs()
+            if (bulbDuration <= 0L) {
+                onError("Bulb duration cannot be zero or negative")
+                stop()
+                return
+            }
+
+            val started = startBulb()
+            if (!started) {
+                onStatusUpdate("Failed to start bulb exposure, stopping intervalometer")
+                stop()
+                return
+            }
+
+            delay(bulbDuration)
+
+            val stopped = stopBulb()
+            if (!stopped) {
+                onStatusUpdate("Failed to stop bulb exposure cleanly")
+            }
+
+        } else {
+            // For shutter speeds over 1 second, use timed capture function
+            val shutterDurationMs = cameraController.currentShutterDurationMs ?: 0L
+            if (shutterDurationMs > 1000L) {
+                performTimedCapture(shutterDurationMs)
+            } else {
+                cameraController.takePicture()
+            }
+        }
+
+        onProgressUpdate(shotNumber, totalShots)
+    }
+
+    /**
+     * Delays for the remainder of the interval after accounting for shot time.
+     * Logs warning if shot time exceeds interval.
+     */
+    private suspend fun shotTimingDelay(intervalMs: Long, elapsedMs: Long) {
+        if (elapsedMs > intervalMs) {
+            onStatusUpdate("⚠ Shot took ${elapsedMs} ms, longer than interval (${intervalMs} ms)")
+            delay(0)
+        } else {
+            delay(intervalMs - elapsedMs)
+        }
+    }
 }
