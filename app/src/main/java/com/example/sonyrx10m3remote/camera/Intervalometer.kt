@@ -1,10 +1,16 @@
-package com.example.sonyrx10m3remote
+package com.example.sonyrx10m3remote.camera
 
-import kotlinx.coroutines.*
-import kotlin.system.measureTimeMillis
-import org.json.JSONObject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import org.json.JSONObject
 import java.util.concurrent.TimeoutException
+import kotlin.system.measureTimeMillis
 
 /**
  * Intervalometer handles both burst (continuous) and interval shooting modes.

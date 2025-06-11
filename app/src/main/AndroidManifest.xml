@@ -29,7 +29,7 @@
         android:requestLegacyExternalStorage="true">
 
         <activity
-            android:name=".PortraitCaptureActivity"
+            android:name=".CaptureActivity"
             android:screenOrientation="portrait"
             android:configChanges="orientation|keyboardHidden|screenSize" />
 
@@ -42,6 +42,8 @@
             </intent-filter>
 
         </activity>
+
+        <activity android:name=".GalleryActivity" />
 
     </application>
 

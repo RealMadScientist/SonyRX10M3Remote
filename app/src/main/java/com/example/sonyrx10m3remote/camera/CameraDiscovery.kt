@@ -1,9 +1,10 @@
-package com.example.sonyrx10m3remote
+package com.example.sonyrx10m3remote.camera
 
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.w3c.dom.Document
+import org.w3c.dom.Element
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -87,7 +88,7 @@ object CameraDiscovery {
 
             for (i in 0 until serviceNodes.length) {
                 val node = serviceNodes.item(i)
-                val element = node as org.w3c.dom.Element
+                val element = node as Element
                 val typeNodeList = element.getElementsByTagName("av:X_ScalarWebAPI_ServiceType")
                 if (typeNodeList.length > 0) {
                     val serviceType = typeNodeList.item(0).textContent

@@ -1,22 +1,31 @@
-package com.example.sonyrx10m3remote
+package com.example.sonyrx10m3remote.camera
 
 import android.graphics.BitmapFactory
-import android.os.Environment
 import android.util.Log
 import android.widget.ImageView
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
-import okhttp3.*
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import org.json.JSONObject
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
 import org.json.JSONArray
+import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
-import java.io.File
-import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.TimeoutException
 
 class CameraController(baseUrl: String) {
@@ -30,7 +39,8 @@ class CameraController(baseUrl: String) {
 
     private val client = OkHttpClient()
 
-    private val rpcUrl = if (baseUrl.endsWith("/camera")) baseUrl else "$baseUrl/camera"
+    private val cameraUrl = if (baseUrl.endsWith("/camera")) baseUrl else "$baseUrl/camera"
+    private val avContentUrl = if (baseUrl.endsWith("/avContent")) baseUrl else "$baseUrl/avContent"
 
     private val jsonMediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
 
@@ -45,12 +55,12 @@ class CameraController(baseUrl: String) {
     val isCapturing: Boolean get() = _isCapturing
 
     // Posts JSON string to the camera API and returns the response body string or null if failed.
-    private suspend fun postJson(jsonBody: String): String? = withContext(Dispatchers.IO) {
+    private suspend fun postJson(url: String, jsonBody: String): String? = withContext(Dispatchers.IO) {
 //        Log.d(TAG, "POST JSON body:\n$jsonBody")
         try {
-            val body = RequestBody.create(jsonMediaType, jsonBody)
+            val body = RequestBody.Companion.create(jsonMediaType, jsonBody)
             val request = Request.Builder()
-                .url(rpcUrl)
+                .url(url)
                 .post(body)
                 .build()
 
@@ -71,6 +81,7 @@ class CameraController(baseUrl: String) {
 
     // Generic function to send a method request with parameters and get the raw JSON response.
     private suspend fun callMethod(
+        url: String,
         method: String,
         params: List<Any> = emptyList(),
         version: String = "1.0"
@@ -81,7 +92,7 @@ class CameraController(baseUrl: String) {
             put("id", 1)
             put("version", version)
         }
-        val resp = postJson(json.toString()) ?: return null
+        val resp = postJson(url, json.toString()) ?: return null
         return try {
             JSONObject(resp)
         } catch (e: Exception) {
@@ -123,8 +134,8 @@ class CameraController(baseUrl: String) {
     }
 
     // Gets the current camera event info.
-    suspend fun getInfo(version: String = "1.0"): JSONObject? = callMethod("getEvent", listOf(false), version)
-    suspend fun getEventLongPoll(): JSONObject? = callMethod("getEvent", listOf(true))
+    suspend fun getInfo(version: String = "1.0"): JSONObject? = callMethod(cameraUrl, "getEvent", listOf(false), version)
+    suspend fun getEventLongPoll(): JSONObject? = callMethod(cameraUrl, "getEvent", listOf(true))
 
     // Waits until camera status becomes "IDLE" or times out.
     suspend fun waitForIdleStatus(timeoutMillis: Long = 10000) {
@@ -136,7 +147,7 @@ class CameraController(baseUrl: String) {
                     .mapNotNull { array.optJSONObject(it)?.takeIf { it.optString("type") == "cameraStatus" }?.optString("cameraStatus") }
                     .firstOrNull()
             }
-            if (status == "IDLE") return
+            if (status == "IDLE" || status == "ContentsTransfer") return
             delay(200)
         }
         throw TimeoutException("Camera did not become IDLE in time")
@@ -144,7 +155,7 @@ class CameraController(baseUrl: String) {
 
     // Starts recording mode on the camera.
     suspend fun startRecMode(): Boolean {
-        val resp = callMethod("startRecMode")
+        val resp = callMethod(cameraUrl, "startRecMode")
         return resp?.has("result") == true.also {
             if (it) Log.d(TAG, "Camera entered recording mode.")
             else Log.e(TAG, "Failed to enter recording mode.")
@@ -153,7 +164,7 @@ class CameraController(baseUrl: String) {
 
     // Starts live view and returns the live view URL or null if failed.
     suspend fun startLiveView(): String? {
-        val resp = callMethod("startLiveview")
+        val resp = callMethod(cameraUrl, "startLiveview")
         val url = resp?.optJSONArray("result")?.optString(0)
         if (url == null) {
             Log.e(TAG, "Failed to get liveview URL")
@@ -208,7 +219,8 @@ class CameraController(baseUrl: String) {
                                 buffer.write(0xD9)
                                 val jpegBytes = buffer.toByteArray()
                                 withContext(Dispatchers.Main) {
-                                    val bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+                                    val bitmap =
+                                        BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
                                     if (bitmap != null) {
                                         imageView.setImageBitmap(bitmap)
                                     }
@@ -237,7 +249,7 @@ class CameraController(baseUrl: String) {
 
     // Requests the current camera function mode.
     suspend fun getCameraFunction(): String? {
-        val resp = callMethod("getCameraFunction")
+        val resp = callMethod(cameraUrl, "getCameraFunction")
         if (resp == null) {
             Log.e(TAG, "getCameraFunction: null response")
             return null
@@ -257,13 +269,13 @@ class CameraController(baseUrl: String) {
 
     // Sets camera function mode.
     suspend fun setCameraFunction(function: String): Boolean {
-        val resp = callMethod("setCameraFunction", listOf(function))
+        val resp = callMethod(cameraUrl, "setCameraFunction", listOf(function))
         return resp?.has("result") == true
     }
 
     // Requests the current shooting mode.
     suspend fun getShootMode(): String? {
-        val resp = callMethod("getShootMode")
+        val resp = callMethod(cameraUrl, "getShootMode")
         if (resp == null) {
             Log.e(TAG, "getShootMode: null response")
             return null
@@ -283,14 +295,14 @@ class CameraController(baseUrl: String) {
 
     // Sets shooting mode.
     suspend fun setShootMode(mode: String): Boolean {
-        val resp = callMethod("setShootMode", listOf(mode))
+        val resp = callMethod(cameraUrl, "setShootMode", listOf(mode))
         return resp?.has("result") == true
     }
 
     // Sets continuous shooting mode.
     suspend fun setContShootingMode(mode: String): Boolean {
         val params = listOf(mapOf("contShootingMode" to mode))
-        val response = callMethod("setContShootingMode", params)
+        val response = callMethod(cameraUrl, "setContShootingMode", params)
         return response?.optJSONArray("result") != null
     }
 
@@ -315,7 +327,7 @@ class CameraController(baseUrl: String) {
                 }
             }
 
-            val resp = callMethod("actTakePicture")
+            val resp = callMethod(cameraUrl, "actTakePicture")
             if (resp == null) {
                 Log.e(TAG, "actTakePicture: null response")
                 return CaptureResult(false)
@@ -352,9 +364,11 @@ class CameraController(baseUrl: String) {
         }
     }
 
+    // -------------------------Remote Shooting Functions-------------------------
+
     // Helper to get a camera setting value by method name.
     private suspend fun getSetting(method: String): String? {
-        val resp = callMethod(method) ?: return null
+        val resp = callMethod(cameraUrl, method) ?: return null
         return resp.optJSONArray("result")?.optString(0)
     }
 
@@ -368,7 +382,7 @@ class CameraController(baseUrl: String) {
             Log.w(TAG, "Invalid value for $method: $value")
             return false
         }
-        val resp = callMethod(method, listOf(value))
+        val resp = callMethod(cameraUrl, method, listOf(value))
         return resp?.has("result") == true
     }
 
@@ -417,13 +431,13 @@ class CameraController(baseUrl: String) {
 
     // Starts continuous shooting mode
     suspend fun startContinuousShooting(): Boolean {
-        val resp = callMethod("startContShooting")
+        val resp = callMethod(cameraUrl, "startContShooting")
         return resp?.has("result") == true
     }
 
     // Stops continuous shooting mode if active
     suspend fun stopContinuousShooting(): Boolean {
-        val resp = callMethod("stopContShooting")
+        val resp = callMethod(cameraUrl, "stopContShooting")
         return resp?.has("result") == true
     }
 
@@ -439,7 +453,7 @@ class CameraController(baseUrl: String) {
                 }
             }
 
-            val response = callMethod("startBulbShooting")
+            val response = callMethod(cameraUrl, "startBulbShooting")
             return if (response?.has("result") == true) {
                 Log.d(TAG, "startBulbShooting succeeded.")
                 true
@@ -455,7 +469,7 @@ class CameraController(baseUrl: String) {
 
     // Stops bulb exposure shot.
     suspend fun stopBulbExposure(): CaptureResult {
-        val resp = callMethod("stopBulbShooting")
+        val resp = callMethod(cameraUrl, "stopBulbShooting")
         if (resp == null) {
             Log.e(TAG, "stopBulbShooting: null response")
             return CaptureResult(false)
@@ -477,7 +491,7 @@ class CameraController(baseUrl: String) {
     }
 
     suspend fun awaitTakePicture(): CaptureResult {
-        val response = callMethod("awaitTakePicture") ?: return CaptureResult(false, emptyList())
+        val response = callMethod(cameraUrl, "awaitTakePicture") ?: return CaptureResult(false, emptyList())
 
         // The API response result array looks like: [ [ "url1", "url2", ... ] ]
         val resultArray = response.optJSONArray("result") ?: return CaptureResult(false, emptyList())
@@ -506,7 +520,7 @@ class CameraController(baseUrl: String) {
                 }
             }
 
-            val response = callMethod("startMovieRec")
+            val response = callMethod(cameraUrl, "startMovieRec")
             return if (response?.has("result") == true) {
                 Log.d(TAG, "startMovieRec succeeded.")
                 true
@@ -523,7 +537,7 @@ class CameraController(baseUrl: String) {
     // Stops video recording.
     suspend fun stopMovieRec(): Boolean {
         try {
-            val response = callMethod("stopMovieRec")
+            val response = callMethod(cameraUrl, "stopMovieRec")
             if (response?.has("result") != true) {
                 Log.e(TAG, "stopMovieRec failed: $response")
                 return false
@@ -549,32 +563,220 @@ class CameraController(baseUrl: String) {
 
     // Starts the auto-focus by simulating a half-press of the shutter
     suspend fun startAutoFocus(): Boolean {
-        val response = callMethod("actHalfPressShutter")
+        val response = callMethod(cameraUrl, "actHalfPressShutter")
         return response != null && !response.has("error")
     }
 
     // Cancels auto-focus by releasing the half shutter press
     suspend fun stopAutoFocus(): Boolean {
-        val response = callMethod("cancelHalfPressShutter")
+        val response = callMethod(cameraUrl, "cancelHalfPressShutter")
         return response != null && !response.has("error")
     }
 
     // Takes a single picture.
     suspend fun takePicture(): Boolean {
-        val resp = callMethod("actTakePicture")
+        val resp = callMethod(cameraUrl, "actTakePicture")
         return resp?.has("result") == true
     }
 
     // Sets the auto-focus position based on coordinates
     suspend fun setTouchAFPosition(xPercent: Float, yPercent: Float): Boolean {
-        val result = callMethod("setTouchAFPosition", listOf(xPercent, yPercent))
+        val result = callMethod(cameraUrl, "setTouchAFPosition", listOf(xPercent, yPercent))
         return result?.has("result") == true
     }
 
     // Cancels auto-focus position set by TouchAF
     suspend fun cancelTouchAFPosition(): Boolean {
-        val result = callMethod("cancelTouchAFPosition")
+        val result = callMethod(cameraUrl, "cancelTouchAFPosition")
         return result?.has("result") == true
+    }
+
+    // -------------------------Contents Transfer Functions-------------------------
+
+    // Data class to hold information from the content list returned by the camera API
+    data class ContentItem(
+        val uri: String,
+        val contentKind: String,
+        val thumbnailUrl: String,
+        val remoteUrl: String,
+        val fileName: String,
+        val lastModified: Long = 0L // epoch millis; default 0 if unknown
+    ) {
+        override fun toString(): String {
+            return "ContentItem(uri='$uri', kind='$contentKind', filename='$fileName', lastModified=$lastModified)"
+        }
+    }
+
+    // Gets the list of all items in the given SD card directory
+    suspend fun getContentList(
+        uri: String = "storage:memoryCard1",
+        stIdx: Int = 0,
+        cnt: Int = 100
+    ): List<ContentItem> {
+        return try {
+            val response = callMethod(
+                method = "getContentList",
+                params = listOf(
+                    mapOf(
+                        "uri" to uri,
+                        "stIdx" to stIdx,
+                        "cnt" to cnt,
+                        "view" to "date"
+                    )
+                ),
+                url = avContentUrl,
+                version = "1.3"
+            ) ?: run {
+                Log.d(TAG, "getContentList: response was null")
+                return emptyList()
+            }
+
+            Log.d(TAG, "getContentList: response (stIdx=$stIdx, cnt=$cnt) = $response")
+            parseContentItems(response)
+        } catch (e: Exception) {
+            Log.e(TAG, "getContentList error: ${e.localizedMessage}")
+            emptyList()
+        }
+    }
+
+    // Helper to parse JSON response into ContentItem list
+    private fun parseContentItems(response: JSONObject): List<ContentItem> {
+        val items = mutableListOf<ContentItem>()
+
+        val resultArray = response.optJSONArray("result") ?: return emptyList()
+        val contentArray = resultArray.optJSONArray(0) ?: return emptyList()
+
+        for (i in 0 until contentArray.length()) {
+            val itemObj = contentArray.optJSONObject(i) ?: continue
+            val contentObj = itemObj.optJSONObject("content")
+
+            val contentKind = itemObj.optString("contentKind")
+            val uri = itemObj.optString("uri")
+            val thumbnailUrl = contentObj?.optString("thumbnailUrl") ?: ""
+            var jpegUrl = ""
+            var jpegFilename = ""
+
+            val createdTimeString = itemObj.optString("createdTime", "")
+            val lastModified = parseIso8601ToMillis(createdTimeString)
+
+            if (contentObj != null) {
+                val originalArray = contentObj.optJSONArray("original")
+                if (originalArray != null) {
+                    for (j in 0 until originalArray.length()) {
+                        val fileObj = originalArray.optJSONObject(j) ?: continue
+                        if (fileObj.optString("stillObject") == "jpeg") {
+                            jpegUrl = fileObj.optString("url")
+                            jpegFilename = fileObj.optString("fileName")
+                            break
+                        }
+                    }
+                }
+            }
+
+            items.add(
+                ContentItem(
+                    uri = uri,
+                    contentKind = contentKind,
+                    fileName = jpegFilename,
+                    thumbnailUrl = thumbnailUrl,
+                    remoteUrl = jpegUrl,
+                    lastModified = lastModified
+                )
+            )
+        }
+        return items
+    }
+
+    // Helper function to parse Iso8601 date format
+    fun parseIso8601ToMillis(dateString: String): Long {
+        if (dateString.isEmpty()) return 0L
+        return try {
+            // Normalize timezone format for SimpleDateFormat: +10:00 -> +1000
+            val normalized = dateString.replace(Regex("(\\+|\\-)\\d{2}:\\d{2}$")) {
+                it.value.replace(":", "")
+            }
+            val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ", Locale.US)
+            sdf.timeZone = TimeZone.getTimeZone("UTC")
+            sdf.parse(normalized)?.time ?: 0L
+        } catch (e: Exception) {
+            0L
+        }
+    }
+
+    // Gets the number of items in a folder
+    suspend fun getContentCount(uri: String = "/"): JSONObject? {
+        return try {
+            callMethod(
+                url = avContentUrl,
+                method = "getContentCount",
+                params = listOf(uri)
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in getContentCount: ${e.localizedMessage}")
+            null
+        }
+    }
+
+    // Fetches the thumbnail image metadata for a file URI
+    suspend fun getThumbnail(uri: String): JSONObject? {
+        return try {
+            callMethod(
+                url = avContentUrl,
+                method = "getThumb",
+                params = listOf(uri)
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in getThumbnail: ${e.localizedMessage}")
+            null
+        }
+    }
+
+    // Retrieves metadata/info for a specific file
+    suspend fun getContentInfo(uri: String): JSONObject? {
+        return try {
+            callMethod(
+                url = avContentUrl,
+                method = "getContentInfo",
+                params = listOf(uri)
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in getContentInfo: ${e.localizedMessage}")
+            null
+        }
+    }
+
+    // Deletes a file or folder by URI
+    suspend fun deleteContent(uri: String): JSONObject? {
+        return try {
+            callMethod(
+                url = avContentUrl,
+                method = "deleteContent",
+                params = listOf(uri)
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in deleteContent: ${e.localizedMessage}")
+            null
+        }
+    }
+
+    // Downloads a file directly from a given HTTP file URL
+    suspend fun downloadContent(fileUrl: String): ByteArray? = withContext(Dispatchers.IO) {
+        try {
+            val request = Request.Builder()
+                .url(fileUrl)
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "Failed to download content from $fileUrl, HTTP code: ${response.code}")
+                    return@withContext null
+                }
+                return@withContext response.body?.bytes()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Download error for $fileUrl: ${e.localizedMessage}")
+            null
+        }
     }
 
     // Disconnect and clean up resources.

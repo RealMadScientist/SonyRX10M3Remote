@@ -1,23 +1,23 @@
-package com.example.sonyrx10m3remote
+package com.example.sonyrx10m3remote.media
 
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
-import android.os.Environment
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import android.view.*
+import android.view.ViewTreeObserver
 import android.widget.ImageView
 import androidx.exifinterface.media.ExifInterface
-import kotlinx.coroutines.*
-import org.json.JSONObject
+import com.example.sonyrx10m3remote.camera.CameraController
+import com.example.sonyrx10m3remote.gallery.CapturedImage
+import com.example.sonyrx10m3remote.gallery.SessionImageRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
 import java.net.URL
-import java.text.SimpleDateFormat
-import java.util.*
 
 class MediaManager(
     private val context: Context,
@@ -29,20 +29,44 @@ class MediaManager(
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private val TAG = "MediaManager"
 
+    private val mediaStoreHelper = MediaStoreHelper(context)
+
+    // Listener interface for new session images
+    interface SessionImageListener {
+        fun onNewSessionImage(image: CapturedImage)
+    }
+
+    // Nullable listener property
+    var sessionImageListener: SessionImageListener? = null
+
     suspend fun onPhotoCaptured(mediaInfo: MediaInfo) {
         val tempFile = downloadPreview(mediaInfo.previewUrl)
         tempFile?.let {
             displayPreviewImageTemporarily(it)
+
+            // Notify listener with a new CapturedImage for session gallery
+            val sessionImage = CapturedImage(
+                id = mediaInfo.filename,
+                remoteUrl = mediaInfo.fullImageUrl,
+                timestamp = System.currentTimeMillis()
+            )
+            sessionImageListener?.onNewSessionImage(sessionImage)
         }
 
         if (prefs.getBoolean("auto_download_jpeg", false)) {
-            downloadImage(mediaInfo.fullImageUrl, mediaInfo.filename)
+            val uri = mediaStoreHelper.downloadImage(mediaInfo.fullImageUrl, mediaInfo.filename)
+            if (uri != null) {
+                Log.d(
+                    "MediaManager",
+                    "Downloaded image, updating SessionImageRepository with URI: $uri"
+                )
+                SessionImageRepository.updateImageUri(mediaInfo.filename, uri)
+            }
         }
     }
 
     // ----- Preview Image Decoding Helpers -----
     fun loadPreviewBitmap(imageFile: File, targetWidth: Int, targetHeight: Int): Bitmap {
-        // Step 1: Downscale bitmap
         val options = BitmapFactory.Options().apply {
             inJustDecodeBounds = true
         }
@@ -104,14 +128,13 @@ class MediaManager(
             imageViewLivePreview.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
                 override fun onPreDraw(): Boolean {
                     imageViewLivePreview.viewTreeObserver.removeOnPreDrawListener(this)
-                    displayPreviewImageTemporarily(imageFile) // retry now that dimensions are valid
+                    displayPreviewImageTemporarily(imageFile)
                     return true
                 }
             })
             return
         }
 
-        // now safe to decode and display the bitmap using targetWidth and targetHeight
         val bmp = loadPreviewBitmap(imageFile, targetWidth, targetHeight)
 
         handler.post {
@@ -129,48 +152,5 @@ class MediaManager(
         val filename: String,
         val isVideo: Boolean = false
     )
-
-    // Function for media manager support - downloads an image from the camera
-    suspend fun downloadImage(url: String, filename: String): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val mimeType = "image/jpeg"
-            val contentValues = android.content.ContentValues().apply {
-                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, filename)
-                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "DCIM/SonyRX10M3Remote")
-                put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
-            }
-
-            val resolver = context.contentResolver
-            val collection = android.provider.MediaStore.Images.Media.getContentUri("external")
-
-            val imageUri = resolver.insert(collection, contentValues)
-            if (imageUri == null) {
-                Log.e(TAG, "Failed to create MediaStore entry.")
-                return@withContext false
-            }
-
-            resolver.openOutputStream(imageUri).use { outputStream ->
-                if (outputStream == null) {
-                    Log.e(TAG, "Failed to get output stream.")
-                    return@withContext false
-                }
-
-                URL(url).openStream().use { inputStream ->
-                    inputStream.copyTo(outputStream)
-                }
-            }
-
-            // Mark file as no longer pending
-            contentValues.clear()
-            contentValues.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
-            resolver.update(imageUri, contentValues, null, null)
-
-            Log.d(TAG, "Image saved to MediaStore: $imageUri")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Download failed", e)
-            false
-        }
-    }
 }
+

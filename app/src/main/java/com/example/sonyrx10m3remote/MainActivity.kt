@@ -1,6 +1,7 @@
 package com.example.sonyrx10m3remote
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
@@ -25,9 +26,19 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.ColorUtils
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
-import com.example.sonyrx10m3remote.CameraController.CaptureResult
-import com.example.sonyrx10m3remote.MediaManager.MediaInfo
+import com.example.sonyrx10m3remote.camera.CameraController
+import com.example.sonyrx10m3remote.camera.CameraControllerProvider
+import com.example.sonyrx10m3remote.camera.CameraController.CaptureResult
+import com.example.sonyrx10m3remote.camera.CameraDiscovery
+import com.example.sonyrx10m3remote.camera.Intervalometer
+import com.example.sonyrx10m3remote.media.MediaManager
+import com.example.sonyrx10m3remote.gallery.CapturedImage
+import com.example.sonyrx10m3remote.gallery.GalleryViewModel
+import com.example.sonyrx10m3remote.gallery.GalleryViewModelFactory
+import com.example.sonyrx10m3remote.gallery.SessionImageRepository
+import com.example.sonyrx10m3remote.media.MediaManager.MediaInfo
 import com.google.android.material.button.MaterialButton
 import com.google.zxing.integration.android.IntentIntegrator
 import kotlinx.coroutines.*
@@ -72,6 +83,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var textTotalShots: TextView
     private lateinit var seekBarTotalShots: SeekBar
     private lateinit var btnStartStop: MaterialButton
+    private lateinit var btnGallery: MaterialButton
 
     // Network-related components
     private lateinit var connectivityManager: ConnectivityManager
@@ -105,7 +117,8 @@ class MainActivity : AppCompatActivity() {
     private var batteryPollJob: Job? = null
 
     // Media manager components
-    lateinit var mediaManager: MediaManager
+    private lateinit var mediaManager: MediaManager
+    private lateinit var galleryViewModel: GalleryViewModel
 
     // QR code scan result handler
     private val qrScannerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -162,6 +175,7 @@ class MainActivity : AppCompatActivity() {
         textTotalShots = findViewById(R.id.textTotalShots)
         seekBarTotalShots = findViewById(R.id.seekBarTotalShots)
         btnStartStop = findViewById<MaterialButton>(R.id.btnStartStop)
+        btnGallery = findViewById<MaterialButton>(R.id.btnGallery)
 
         val aspectRatioLayout = findViewById<com.example.sonyrx10m3remote.ui.AspectRatioFrameLayout>(R.id.rootLayout)
         aspectRatioLayout.setAspectRatio(4f / 3f) // or 3f / 2f for photo aspect ratio, depending on your source
@@ -212,7 +226,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 val integrator = IntentIntegrator(this)
-                integrator.captureActivity = PortraitCaptureActivity::class.java
+                integrator.captureActivity = CaptureActivity::class.java
                 integrator.setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
                 integrator.setPrompt("Scan Camera Wi-Fi QR Code")
                 integrator.setBeepEnabled(true)
@@ -304,6 +318,12 @@ class MainActivity : AppCompatActivity() {
                 btnStartStop.applySmartTint()
             }
         }
+
+        // Open gallery
+        btnGallery.setOnClickListener {
+            val intent = Intent(this, GalleryActivity::class.java)
+            startActivity(intent)
+        }
     }
 
     private fun setUiEnabled(enabled: Boolean) {
@@ -317,6 +337,7 @@ class MainActivity : AppCompatActivity() {
         seekBarInterval.isEnabled = enabled
         seekBarTotalShots.isEnabled = enabled
         btnStartStop.isEnabled = enabled
+//        btnGallery.isEnabled = enabled
     }
 
     private fun hasLocationPermission(): Boolean {
@@ -497,7 +518,9 @@ class MainActivity : AppCompatActivity() {
             }
 
             val base = rpcBaseUrl ?: cameraLocation
-            cameraController = CameraController(base)
+            CameraControllerProvider.init(base)
+            cameraController = CameraControllerProvider.instance
+                ?: throw IllegalStateException("CameraController instance is null after initialization")
             intervalometer = Intervalometer(
                 cameraController,
                 onStatusUpdate = this@MainActivity::showStatus,
@@ -509,10 +532,12 @@ class MainActivity : AppCompatActivity() {
                 },
                 getShutterSpeed = { if (isBulbMode) "BULB" else "OTHER" },
                 startBulb = { runBlocking { startBulbExposure() } }, // assuming startBulbExposure returns Boolean
-                stopBulb = { runBlocking {
-                    val result = stopBulbExposure()
-                    result.success
-                } },
+                stopBulb = {
+                    runBlocking {
+                        val result = stopBulbExposure()
+                        result.success
+                    }
+                },
                 performTimedCapture = { performTimedCapture(it) },
                 getBulbDurationMs = { bulbDurationMs },
                 onError = { errorMessage ->
@@ -660,6 +685,10 @@ class MainActivity : AppCompatActivity() {
                     showStatus("Failed to start live view.")
                 }
 
+                // Instantiate galleryViewModel
+                galleryViewModel = ViewModelProvider(this@MainActivity, GalleryViewModelFactory(applicationContext))
+                    .get(GalleryViewModel::class.java)
+
                 // Instantiate mediaManager
                 mediaManager = MediaManager(
                     context = this@MainActivity,
@@ -667,6 +696,15 @@ class MainActivity : AppCompatActivity() {
                     imageViewLivePreview = imageView,
                     resumeLiveViewCallback = { restartLiveView() }
                 )
+
+                // Connect mediaManager to sessionImageRepository
+                mediaManager.sessionImageListener = object : MediaManager.SessionImageListener {
+                    override fun onNewSessionImage(image: CapturedImage) {
+                        Log.d("MainActivity", "New session image received: ${image.id}")
+                        // Instead of galleryViewModel.addSessionImages, use:
+                        SessionImageRepository.addImages(listOf(image))
+                    }
+                }
 
                 // Make icons visible
                 findViewById<ImageView>(R.id.batteryIcon).visibility = View.VISIBLE

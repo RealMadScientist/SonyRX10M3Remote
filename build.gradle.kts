@@ -6,8 +6,8 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath("com.android.tools.build:gradle:8.0.2")  // latest AGP for compatibility with SDK 29+
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.8.22")
+        classpath("com.android.tools.build:gradle:8.1.1")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.20")
     }
 }
 
