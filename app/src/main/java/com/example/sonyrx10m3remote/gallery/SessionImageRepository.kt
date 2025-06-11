@@ -11,6 +11,8 @@ object SessionImageRepository {
     private val _sessionImages = MutableStateFlow<List<CapturedImage>>(emptyList())
     val sessionImages: StateFlow<List<CapturedImage>> = _sessionImages
 
+    var restartLiveViewCallback: (() -> Unit)? = null
+
     fun addImages(images: List<CapturedImage>) {
         val current = _sessionImages.value
         val combined = (current + images).distinctBy { it.id }

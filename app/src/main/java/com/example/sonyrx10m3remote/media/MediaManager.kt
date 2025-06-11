@@ -12,6 +12,7 @@ import android.view.ViewTreeObserver
 import android.widget.ImageView
 import androidx.exifinterface.media.ExifInterface
 import com.example.sonyrx10m3remote.camera.CameraController
+import com.example.sonyrx10m3remote.camera.CameraController.ContentItem
 import com.example.sonyrx10m3remote.gallery.CapturedImage
 import com.example.sonyrx10m3remote.gallery.SessionImageRepository
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +31,30 @@ class MediaManager(
     private val TAG = "MediaManager"
 
     private val mediaStoreHelper = MediaStoreHelper(context)
+
+    private val _seenUris = mutableSetOf<String>()
+    private val _visitedDirs = mutableSetOf<String>()
+    private val _cachedImages = mutableListOf<ContentItem>()
+    private val _cachedVideos = mutableListOf<ContentItem>()
+    val seenUris: MutableSet<String> = mutableSetOf()
+    val cachedImages: List<ContentItem> get() = _cachedImages
+    val cachedVideos: List<ContentItem> get() = _cachedVideos
+
+    // Variables to store media tags from the camera that have already been collected
+    fun markSeen(vararg items: ContentItem) {
+        _seenUris.addAll(items.map { it.uri })
+    }
+
+    fun addToCache(images: List<ContentItem>, videos: List<ContentItem>) {
+        _cachedImages.addAll(images)
+        _cachedVideos.addAll(videos)
+    }
+
+    fun clearCache() {
+        _seenUris.clear()
+        _cachedImages.clear()
+        _cachedVideos.clear()
+    }
 
     // Listener interface for new session images
     interface SessionImageListener {

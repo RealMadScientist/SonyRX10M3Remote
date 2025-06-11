@@ -685,10 +685,6 @@ class MainActivity : AppCompatActivity() {
                     showStatus("Failed to start live view.")
                 }
 
-                // Instantiate galleryViewModel
-                galleryViewModel = ViewModelProvider(this@MainActivity, GalleryViewModelFactory(applicationContext))
-                    .get(GalleryViewModel::class.java)
-
                 // Instantiate mediaManager
                 mediaManager = MediaManager(
                     context = this@MainActivity,
@@ -696,6 +692,11 @@ class MainActivity : AppCompatActivity() {
                     imageViewLivePreview = imageView,
                     resumeLiveViewCallback = { restartLiveView() }
                 )
+                MediaManagerProvider.instance = mediaManager
+
+                // Instantiate galleryViewModel
+                galleryViewModel = ViewModelProvider(this@MainActivity, GalleryViewModelFactory(applicationContext, mediaManager, cameraController))
+                    .get(GalleryViewModel::class.java)
 
                 // Connect mediaManager to sessionImageRepository
                 mediaManager.sessionImageListener = object : MediaManager.SessionImageListener {
@@ -703,6 +704,11 @@ class MainActivity : AppCompatActivity() {
                         Log.d("MainActivity", "New session image received: ${image.id}")
                         // Instead of galleryViewModel.addSessionImages, use:
                         SessionImageRepository.addImages(listOf(image))
+                    }
+                }
+                SessionImageRepository.restartLiveViewCallback = {
+                    runOnUiThread {
+                        restartLiveView()
                     }
                 }
 

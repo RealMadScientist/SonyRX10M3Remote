@@ -7,7 +7,7 @@ import android.widget.ImageView
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.example.sonyrx10m3remote.R
+import com.example.sonyrx10m3remote.media.MediaManager
 import com.example.sonyrx10m3remote.media.MediaStoreHelper
 import com.example.sonyrx10m3remote.camera.CameraController
 import com.example.sonyrx10m3remote.camera.CameraController.ContentItem
@@ -40,7 +40,9 @@ enum class CameraSdViewType {
 }
 
 class GalleryViewModel(
-    private val context: Context
+    private val context: Context,
+    private val mediaManager: MediaManager,
+    private val cameraController: CameraController
 ) : ViewModel() {
     private val mediaStoreHelper = MediaStoreHelper(context)
 
@@ -65,10 +67,9 @@ class GalleryViewModel(
     private val _mode = MutableStateFlow(GalleryMode.SESSION)
     val mode: StateFlow<GalleryMode> = _mode
 
-    private val seenUris = mutableSetOf<String>()
-    private val cachedImages = mutableListOf<ContentItem>()
-    private val cachedVideos = mutableListOf<ContentItem>()
     private val visitedDirs = mutableSetOf<String>()
+
+    var restartLiveViewCallback: (() -> Unit)? = null
 
     init {
         viewModelScope.launch {
@@ -112,9 +113,10 @@ class GalleryViewModel(
             }
 
             try {
-                withContext(NonCancellable) {
-                    val liveViewUrl = cameraController.startLiveView()
-                }
+                // Call the restartLiveView callback here to start MJPEG stream & UI stuff
+                Log.d("GalleryViewModel", "Attempting to invoke restartLiveViewCallback...")
+                SessionImageRepository.restartLiveViewCallback?.invoke() ?: Log.w("GalleryViewModel", "restartLiveViewCallback is null!")
+
             } catch (e: Exception) {
                 Log.e("GalleryViewModel", "Error starting live view: ${e.localizedMessage}")
             }
@@ -142,8 +144,6 @@ class GalleryViewModel(
     fun loadCameraSdImages(cameraController: CameraController) {
         viewModelScope.launch {
             try {
-                visitedDirs.clear()
-
                 val rootUri = "storage:memoryCard1"
                 val newImages = mutableListOf<ContentItem>()
                 val newVideos = mutableListOf<ContentItem>()
@@ -155,18 +155,11 @@ class GalleryViewModel(
                     videos = newVideos
                 )
 
-                // Only keep unseen content
-                val uniqueNewImages = newImages.filter { it.uri !in seenUris }
-                val uniqueNewVideos = newVideos.filter { it.uri !in seenUris }
+                // Add new media items to cache and mark them seen
+                mediaManager.addToCache(newImages, newVideos)
 
-                // Update cache and seen list
-                seenUris.addAll(uniqueNewImages.map { it.uri })
-                seenUris.addAll(uniqueNewVideos.map { it.uri })
-                cachedImages.addAll(uniqueNewImages)
-                cachedVideos.addAll(uniqueNewVideos)
-
-                // Update state
-                _cameraSdImages.value = cachedImages
+                // Update state flows with sorted + mapped images/videos
+                _cameraSdImages.value = mediaManager.cachedImages
                     .sortedBy { it.lastModified }
                     .map { item ->
                         CapturedImage(
@@ -177,7 +170,7 @@ class GalleryViewModel(
                         )
                     }
 
-                _cameraSdVideos.value = cachedVideos
+                _cameraSdVideos.value = mediaManager.cachedVideos
                     .sortedBy { it.lastModified }
                     .map { item ->
                         CapturedImage(
@@ -207,19 +200,16 @@ class GalleryViewModel(
         pageSize: Int = 100
     ) {
         Log.d("GalleryViewModel", "Recursing into $uri at depth $currentDepth")
-        if (uri in visitedDirs) {
-            Log.w("GalleryViewModel", "Already visited $uri, skipping")
-            return
-        }
-        visitedDirs.add(uri)
 
         if (currentDepth > maxDepth) {
             Log.w("GalleryViewModel", "Max recursion depth reached at URI: $uri")
             return
         }
 
-        val directories = mutableListOf<ContentItem>()
+        val alreadyVisited = uri in mediaManager.seenUris
         var startIndex = 0
+        val directories = mutableListOf<ContentItem>()
+        var lastDir: ContentItem? = null
 
         while (true) {
             val contents = cameraController.getContentList(uri = uri, stIdx = startIndex, cnt = pageSize)
@@ -231,23 +221,34 @@ class GalleryViewModel(
             }
 
             val stills = contents.filter { it.contentKind.equals("still", ignoreCase = true) }
-            val vids = contents.filter { it.contentKind.equals("video", ignoreCase = true) }
-            val newDirs = contents.filter { it.contentKind.equals("directory", ignoreCase = true) }
-
-            val newStills = stills.filter { it.uri !in seenUris }
-            val newVideos = vids.filter { it.uri !in seenUris }
-
-            Log.d("GalleryViewModel", "Found newStills=${newStills.size}, newVideos=${newVideos.size}, newDirs=${newDirs.size}")
-
-            // Bail out only if no new images/videos AND no directories
-            if (newStills.isEmpty() && newVideos.isEmpty() && newDirs.isEmpty()) {
-                Log.d("GalleryViewModel", "No new media or directories found, breaking loop")
-                break
+            val newStills = stills.filter { item ->
+                val isNew = item.uri !in mediaManager.seenUris
+                if (isNew) mediaManager.seenUris.add(item.uri)
+                isNew
             }
+
+            val vids = contents.filter { it.contentKind.equals("video", ignoreCase = true) }
+            val newVideos = vids.filter { item ->
+                val isNew = item.uri !in mediaManager.seenUris
+                if (isNew) mediaManager.seenUris.add(item.uri)
+                isNew
+            }
+
+            val dirs = contents.filter { it.contentKind.equals("directory", ignoreCase = true) }
+            if (dirs.isNotEmpty()) {
+                lastDir = dirs.last()
+            }
+
+            Log.d("GalleryViewModel", "Found newStills=${newStills.size}, newVideos=${newVideos.size}, directories=${dirs.size}")
 
             images.addAll(newStills)
             videos.addAll(newVideos)
-            directories.addAll(newDirs)
+
+            if (alreadyVisited) {
+                Log.d("GalleryViewModel", "Revisited $uri and found ${newStills.size} new stills, ${newVideos.size} new videos")
+            }
+
+            directories.addAll(dirs)
 
             if (contents.size < pageSize) {
                 Log.d("GalleryViewModel", "Last page of contents received (< pageSize), breaking loop")
@@ -257,7 +258,19 @@ class GalleryViewModel(
             startIndex += pageSize
         }
 
-        for (dir in directories) {
+        // Mark this directory as visited
+        if (!alreadyVisited) {
+            mediaManager.seenUris.add(uri)
+        }
+
+        // Recurse into all directories unless seen — but always include the lastDir
+        val dirsToVisit = directories.distinctBy { it.uri }.filter { dir ->
+            val isLast = (dir == lastDir)
+            val notSeen = dir.uri !in mediaManager.seenUris
+            notSeen || isLast
+        }
+
+        for (dir in dirsToVisit) {
             Log.d("GalleryViewModel", "Recursing into subdirectory: ${dir.uri}")
             loadMediaRecursively(cameraController, dir.uri, images, videos, currentDepth + 1, maxDepth, pageSize)
         }
@@ -282,12 +295,14 @@ class GalleryViewModel(
 }
 
 class GalleryViewModelFactory(
-    private val context: Context
+    private val context: Context,
+    private val mediaManager: MediaManager,
+    private val cameraController: CameraController
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(GalleryViewModel::class.java)) {
-            return GalleryViewModel(context) as T
+            return GalleryViewModel(context, mediaManager, cameraController) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }
