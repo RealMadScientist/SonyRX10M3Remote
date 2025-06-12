@@ -16,10 +16,7 @@ class GalleryActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         val mediaManager = MediaManagerProvider.instance
-            ?: error("MediaManager is not initialized")
-
         val cameraController = CameraControllerProvider.instance
-            ?: throw IllegalStateException("CameraController instance is null after initialization")
 
         setContent {
             RX10M3RemoteTheme {

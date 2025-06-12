@@ -20,7 +20,7 @@ class MediaStoreHelper(private val context: Context) {
                 val contentValues = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
                     put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, "DCIM/SonyRX10M3Remote")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "DCIM/SonyRX10M3Remote/")
                     put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }
 
@@ -80,6 +80,7 @@ class MediaStoreHelper(private val context: Context) {
                 selectionArgs,
                 sortOrder
             )?.use { cursor ->
+                Log.d(TAG, "Cursor count for RELATIVE_PATH='$folderRelativePath': ${cursor.count}")
                 val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
                 while (cursor.moveToNext()) {
                     val id = cursor.getLong(idColumn)

@@ -41,8 +41,8 @@ enum class CameraSdViewType {
 
 class GalleryViewModel(
     private val context: Context,
-    private val mediaManager: MediaManager,
-    private val cameraController: CameraController
+    private val mediaManager: MediaManager?,
+    private val cameraController: CameraController?
 ) : ViewModel() {
     private val mediaStoreHelper = MediaStoreHelper(context)
 
@@ -66,10 +66,6 @@ class GalleryViewModel(
 
     private val _mode = MutableStateFlow(GalleryMode.SESSION)
     val mode: StateFlow<GalleryMode> = _mode
-
-    private val visitedDirs = mutableSetOf<String>()
-
-    var restartLiveViewCallback: (() -> Unit)? = null
 
     init {
         viewModelScope.launch {
@@ -142,6 +138,11 @@ class GalleryViewModel(
 
     // Iteratively runs getContentList() to search through the directory structure of camera storage for image/video files
     fun loadCameraSdImages(cameraController: CameraController) {
+        if (mediaManager == null) {
+            Log.e("GalleryViewModel", "mediaManager is null. Cannot load camera SD images.")
+            return
+        }
+
         viewModelScope.launch {
             try {
                 val rootUri = "storage:memoryCard1"
@@ -199,6 +200,11 @@ class GalleryViewModel(
         maxDepth: Int = 10,
         pageSize: Int = 100
     ) {
+        if (mediaManager == null) {
+            Log.e("GalleryViewModel", "mediaManager is null. Cannot load camera SD images.")
+            return
+        }
+
         Log.d("GalleryViewModel", "Recursing into $uri at depth $currentDepth")
 
         if (currentDepth > maxDepth) {
@@ -279,6 +285,7 @@ class GalleryViewModel(
     private fun loadDownloadedImages(folderRelativePath: String = "DCIM/SonyRX10M3Remote/") {
         viewModelScope.launch {
             val uris = mediaStoreHelper.loadDownloadedImages(folderRelativePath)
+            Log.d("GalleryViewModel", "Loaded ${uris.size} downloaded images")
             _downloadedImages.value = uris.map { uri ->
                 CapturedImage(
                     id = uri.toString(),
@@ -296,8 +303,8 @@ class GalleryViewModel(
 
 class GalleryViewModelFactory(
     private val context: Context,
-    private val mediaManager: MediaManager,
-    private val cameraController: CameraController
+    private val mediaManager: MediaManager?,
+    private val cameraController: CameraController?
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {

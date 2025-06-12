@@ -94,6 +94,7 @@ class MainActivity : AppCompatActivity() {
 
     // Auto-focus flag
     private var isAutoFocusEngaged = false
+    private var isTouchAFEngaged = false
     private var liveViewImageView: ImageView? = null
 
     // Bulb exposure-related components
@@ -239,9 +240,12 @@ class MainActivity : AppCompatActivity() {
         // Toggle auto-focus
         btnAutoFocus.setOnClickListener {
             lifecycleScope.launch {
-                if (!isAutoFocusEngaged) {
+                if (!isAutoFocusEngaged && !isTouchAFEngaged) {
+                    // Start autofocus
                     val success = cameraController.startAutoFocus()
                     if (success) {
+                        isAutoFocusEngaged = true
+                        isTouchAFEngaged = false
                         startAutoFocusUI()
                         cameraController.startAFPoll()
                     } else {
@@ -249,9 +253,11 @@ class MainActivity : AppCompatActivity() {
                         btnCapture.isEnabled = true
                     }
                 } else {
-                    // Cancel both regular and touch AF modes
+                    // Cancel both AF and Touch AF
                     cameraController.stopAutoFocus()
                     cameraController.cancelTouchAFPosition()
+                    isAutoFocusEngaged = false
+                    isTouchAFEngaged = false
                     stopAutoFocusUI()
                     cameraController.stopAFPoll()
                 }
@@ -671,7 +677,7 @@ class MainActivity : AppCompatActivity() {
                     updateFn = cameraController::setExpComp
                 )
 
-                // Start live view
+// Start live view
                 showStatus("Camera is idle. Initialising live view...")
                 val imageView = findViewById<ImageView>(R.id.liveViewImage)
                 liveViewImageView = imageView
@@ -679,8 +685,8 @@ class MainActivity : AppCompatActivity() {
                 if (liveViewUrl != null) {
                     showStatus("Live view started!")
                     cameraController.startMjpegStream(liveViewUrl, imageView)
-                    enableTouchAF(true)  // <-- just pass true here
-                    collectfocusstatusflow()
+                    enableTouchAF(true)  // Enable touch AF
+                    collectFocusStatusFlow()
                 } else {
                     showStatus("Failed to start live view.")
                 }
@@ -807,13 +813,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     // Function to acquire the focus status of the camera
-    private fun collectfocusstatusflow() {
+    private fun collectFocusStatusFlow() {
         lifecycleScope.launch {
             cameraController.focusStatus
                 .catch { e -> Log.e(TAG, "Error collecting focusStatus", e) }
                 .collect { focus ->
                     Log.d(TAG, "Focus status update: $focus")
-                    if (isAutoFocusEngaged) {
+                    if (isAutoFocusEngaged || isTouchAFEngaged) {
                         onFocusStatusChanged(focus)
                     }
                 }
@@ -822,31 +828,28 @@ class MainActivity : AppCompatActivity() {
 
     // Function to update UI based on the focusing state of the camera
     private fun onFocusStatusChanged(focusStatus: String) {
+        if (!isAutoFocusEngaged && !isTouchAFEngaged) {
+            Log.d(TAG, "Ignoring focus status update: no AF engaged")
+            return
+        }
+        if (cameraController.isCapturing) {
+            Log.d(TAG, "Ignoring focus status update: camera is capturing")
+            return
+        }
+
         runOnUiThread {
             when (focusStatus) {
                 "Focused" -> {
                     btnAutoFocus.applySmartTint(android.R.color.holo_green_light)
                     btnAutoFocus.text = "AF: On"
                     btnCapture.isEnabled = true
-                    btnVideo.isEnabled = true // ENABLE VIDEO
+                    btnVideo.isEnabled = true
                 }
                 "Focusing" -> {
                     btnAutoFocus.applySmartTint(android.R.color.holo_orange_light)
                     btnAutoFocus.text = "Focusing..."
                     btnCapture.isEnabled = false
                     btnVideo.isEnabled = false
-                }
-                else -> {
-                    if (!isAutoFocusEngaged || cameraController.isCapturing) {
-                        resetAFButtonHighlight()
-                        btnVideo.isEnabled = true // Fallback enable
-                    } else {
-                        // Autofocus is engaged but status unknown, keep orange & disable capture/video
-                        btnAutoFocus.applySmartTint(android.R.color.holo_orange_light)
-                        btnAutoFocus.text = "Focusing..."
-                        btnCapture.isEnabled = false
-                        btnVideo.isEnabled = false
-                    }
                 }
             }
         }
@@ -869,10 +872,12 @@ class MainActivity : AppCompatActivity() {
     // Call this to reset UI when autofocus stops (manual or touch)
     private fun stopAutoFocusUI() {
         isAutoFocusEngaged = false
-        resetAFButtonHighlight()
+        if (!isTouchAFEngaged) {
+            resetAFButtonHighlight()
+            focusRectangle.visibility = View.INVISIBLE
+        }
         btnCapture.isEnabled = true
         btnVideo.isEnabled = true
-        focusRectangle.visibility = View.INVISIBLE
     }
 
     // Function to send the coordinates from a touch on the live image view to set the auto-focus on the camera to that object
@@ -893,13 +898,19 @@ class MainActivity : AppCompatActivity() {
                         focusRectangle.visibility = View.VISIBLE
 
                         lifecycleScope.launch {
-                            startAutoFocusUI()
+                            isTouchAFEngaged = true
+                            isAutoFocusEngaged = false
+                            startAutoFocusUI()  // Use same UI changes: orange "Focusing..."
                             val success = cameraController.setTouchAFPosition(xPercent, yPercent)
-                            Log.d("TouchAF", "Requested AF at $xPercent%, $yPercent%: success=$success")
+                            Log.d(
+                                "TouchAF",
+                                "Requested AF at $xPercent%, $yPercent%: success=$success"
+                            )
                             if (success) {
                                 cameraController.stopAFPoll()
                                 cameraController.startAFPoll()
                             } else {
+                                isTouchAFEngaged = false
                                 stopAutoFocusUI()
                             }
                         }
@@ -916,7 +927,6 @@ class MainActivity : AppCompatActivity() {
 
     // Function to update the appearance of the capture button
     private fun updateCaptureButton() {
-        // Reset listeners and timer job
         btnCapture.setOnClickListener(null)
         btnCapture.setOnLongClickListener(null)
         captureTimerJob?.cancel()
@@ -994,13 +1004,39 @@ class MainActivity : AppCompatActivity() {
             mainScope.launch {
                 val shutterDurationMs = cameraController.currentShutterDurationMs ?: 0L
                 cameraController.stopMjpegStream()
+
                 if (shutterDurationMs > 1000) {
+                    // Long capture duration: run performTimedCapture, which handles capture result internally
                     performTimedCapture(shutterDurationMs)
                 } else {
+                    // Short capture duration: captureStill returns CaptureResult directly
                     val result = cameraController.captureStill()
+                    handleCaptureResult(result)
+
+                    if (isAutoFocusEngaged) {
+                        // Autofocus: clear UI and flags after capture
+                        stopAutoFocusUI()
+                    } else if (isTouchAFEngaged) {
+                        // TouchAF: keep focus UI and flags as-is
+                        runOnUiThread {
+                            btnAutoFocus.applySmartTint(android.R.color.holo_green_light)
+                            btnAutoFocus.text = "AF: On"
+                            btnCapture.isEnabled = true
+                            btnVideo.isEnabled = true
+                        }
+                    } else {
+                        // No focus: reset UI normally
+                        runOnUiThread {
+                            btnAutoFocus.applySmartTint()
+                            btnAutoFocus.text = "Auto Focus"
+                            btnCapture.isEnabled = true
+                            btnVideo.isEnabled = true
+                        }
+                    }
+
                     btnCapture.text = "Capture"
                     btnCapture.applySmartTint()
-                    handleCaptureResult(result)
+                    btnCapture.isEnabled = true
                 }
             }
         }
@@ -1040,8 +1076,8 @@ class MainActivity : AppCompatActivity() {
                 mediaManager.onPhotoCaptured(mediaInfo)
             }
             showStatus("Captured photo")
-            resetAFButtonHighlight()
-            isAutoFocusEngaged = false
+            stopAutoFocusUI()
+            cameraController.stopAFPoll()
         } else {
             showStatus("Failed to capture photo")
         }
@@ -1062,144 +1098,6 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-//    private fun updateCaptureButton() {
-//        // Clear listeners and cancel any existing timer job
-//        btnCapture.setOnClickListener(null)
-//        btnCapture.setOnLongClickListener(null)
-//        captureTimerJob?.cancel()
-//        captureTimerJob = null
-//
-//        if (isBulbMode) {
-//            if (isBulbCapturing) {
-//                // Bulb exposure is active
-//                if (bulbDurationMs > 0) {
-//                    // Timer set - show Stop button and countdown remaining time
-//                    btnCapture.text = "Stop Bulb"
-//                    btnCapture.applySmartTint(android.R.color.holo_red_dark)
-//
-//                    captureTimerJob = mainScope.launch {
-//                        val startTime = System.currentTimeMillis()
-//                        while (isBulbCapturing) {
-//                            val elapsed = System.currentTimeMillis() - startTime
-//                            val remaining = bulbDurationMs - elapsed
-//                            if (remaining <= 0) break
-//                            btnCapture.text = "Stop (" + formatElapsedTime(remaining) + ")"
-//                            delay(250)
-//                        }
-//                    }
-//                } else {
-//                    // No timer set - show elapsed time since exposure started, button red, stops on click
-//                    btnCapture.applySmartTint(android.R.color.holo_red_dark)
-//                    captureTimerJob = mainScope.launch {
-//                        val startTime = System.currentTimeMillis()
-//                        while (isBulbCapturing) {
-//                            val elapsed = System.currentTimeMillis() - startTime
-//                            btnCapture.text = "Stop (" + formatElapsedTime(elapsed) + ")"
-//                            delay(250)
-//                        }
-//                    }
-//                }
-//
-//                // Stop bulb exposure on button click
-//                btnCapture.setOnClickListener {
-//                    mainScope.launch {
-//                        val stopped = stopBulbExposure()
-//                        if (stopped) {
-//                            showStatus("Captured photo")
-//                            resetAFButtonHighlight()
-//                            isAutoFocusEngaged = false
-//                        } else {
-//                            showStatus("Failed to stop bulb exposure")
-//                        }
-//                        updateCaptureButton()
-//                    }
-//                }
-//
-//            } else {
-//                // Bulb not capturing - show start button
-//                btnCapture.text = "Start Bulb"
-//                btnCapture.applySmartTint()
-//
-//                btnCapture.setOnClickListener {
-//                    mainScope.launch {
-//                        val started = startBulbExposure()
-//                        if (!started) {
-//                            showStatus("Failed to start bulb exposure")
-//                            return@launch
-//                        }
-//
-//                        if (bulbDurationMs > 0) {
-//                            // Auto-stop after timer, show countdown
-//                            captureTimerJob = launch {
-//                                val startTime = System.currentTimeMillis()
-//                                var millisLeft = bulbDurationMs
-//                                while (millisLeft > 0 && isBulbCapturing) {
-//                                    btnCapture.text = "Stop (" + formatElapsedTime(millisLeft) + ")"
-//                                    btnCapture.applySmartTint(android.R.color.holo_red_dark)
-//                                    delay(250)
-//                                    millisLeft = bulbDurationMs - (System.currentTimeMillis() - startTime)
-//                                }
-//                            }
-//
-//                            delay(bulbDurationMs)
-//
-//                            val stopped = stopBulbExposure()
-//                            captureTimerJob?.cancel()
-//                            captureTimerJob = null
-//
-//                            if (stopped) {
-//                                showStatus("Captured photo")
-//                                resetAFButtonHighlight()
-//                                isAutoFocusEngaged = false
-//                            } else {
-//                                showStatus("Failed to stop bulb exposure")
-//                            }
-//                            updateCaptureButton()
-//
-//                        } else {
-//                            // No timer set, just update to show elapsed time until stopped manually
-//                            updateCaptureButton()
-//                        }
-//                    }
-//                }
-//            }
-//
-//            btnCapture.setOnLongClickListener {
-//                showTimerSetupDialog()
-//                true
-//            }
-//        } else {
-//            // Not bulb mode - normal capture button with possible countdown
-//
-//            btnCapture.text = "Capture"
-//            btnCapture.applySmartTint()
-//            btnCapture.setOnLongClickListener(null)
-//
-//            btnCapture.setOnClickListener {
-//                mainScope.launch {
-//                    val shutterDurationMs = cameraController.currentShutterDurationMs ?: 0L
-//                    Log.d("CaptureButton", "Clicked, shutterDurationMs=$shutterDurationMs")
-//
-//                    if (shutterDurationMs > 1000) {
-//                        performTimedCapture(shutterDurationMs)
-//                    } else {
-//                        val success = cameraController.captureStill()
-//                        btnCapture.text = "Capture"
-//                        btnCapture.applySmartTint()
-//
-//                        if (success) {
-//                            showStatus("Captured photo")
-//                            resetAFButtonHighlight()
-//                            isAutoFocusEngaged = false
-//                        } else {
-//                            showStatus("Failed to capture photo")
-//                        }
-//                    }
-//                }
-//            }
-//        }
-//    }
-
     // Helper function to perform timed captures
     fun performTimedCapture(durationMs: Long) {
         captureTimerJob?.cancel()
@@ -1218,25 +1116,15 @@ class MainActivity : AppCompatActivity() {
                 } while (timeLeft > 0)
             }
 
-            val result: CaptureResult = cameraController.captureStill()
+            val result = cameraController.captureStill()
 
             countdownJob.cancel()
             captureTimerJob = null
             btnCapture.text = "Capture"
             btnCapture.applySmartTint()
 
-            if (result.success) {
-                // Build MediaInfo from URLs
-                val mediaInfo = buildMediaInfoFromUrls(result.imageUrls)
-                mediaInfo?.let {
-                    mediaManager.onPhotoCaptured(it)
-                }
-                showStatus("Captured photo")
-                resetAFButtonHighlight()
-                isAutoFocusEngaged = false
-            } else {
-                showStatus("Failed to capture photo")
-            }
+            // Call your suspend function here inside the coroutine
+            handleCaptureResult(result)
         }
     }
 
@@ -1259,13 +1147,18 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnVideo.setOnClickListener {
-            if (!isRecordingVideo) {
-                startVideoRecording()
-            } else {
-                stopVideoRecording()
-                showStatus("Captured video")
-                resetAFButtonHighlight()
-                isAutoFocusEngaged = false
+            mainScope.launch {
+                if (!isRecordingVideo) {
+                    // If autofocus or touchAF active, capture behavior can adapt here if needed
+                    // But mainly, just start video recording
+                    startVideoRecording()
+                } else {
+                    stopVideoRecording()
+                    showStatus("Captured video")
+                    resetAFButtonHighlight()
+                    isAutoFocusEngaged = false
+                    // touchAF remains active until cancelled elsewhere
+                }
             }
         }
 
@@ -1340,17 +1233,6 @@ class MainActivity : AppCompatActivity() {
                 cameraController.waitForIdleStatus()
 
                 showStatus("Camera idle. Processing...")
-
-//                val liveViewUrl = cameraController.startLiveView()
-//                if (liveViewUrl != null) {
-//                    showStatus("Live view resumed.")
-//                    liveViewImageView?.let { imageView ->
-//                        cameraController.startMjpegStream(liveViewUrl, imageView)
-//                    }
-//                } else {
-//                    showStatus("Failed to restart live view.")
-//                    Log.e(TAG, "startLiveView returned null URL after bulb exposure")
-//                }
 
             } catch (e: TimeoutException) {
                 Log.e(TAG, "Camera did not return to IDLE in time", e)
@@ -1488,7 +1370,7 @@ class MainActivity : AppCompatActivity() {
             if (success) {
                 showStatus("Recording started")
 
-                startVideoUITimer(videoDurationMs) // <-- 🔥 UI update loop
+                startVideoUITimer(videoDurationMs) // UI update loop
 
                 if (videoDurationMs > 0) {
                     delay(videoDurationMs)
@@ -1717,7 +1599,7 @@ class MainActivity : AppCompatActivity() {
                 cameraController.startMjpegStream(liveViewUrl, view)
                 showStatus("Live view resumed.")
                 enableTouchAF(true)
-                collectfocusstatusflow()
+                collectFocusStatusFlow()
             } else {
                 showStatus("Failed to resume live view.")
             }
