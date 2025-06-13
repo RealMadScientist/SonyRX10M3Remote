@@ -26,11 +26,15 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.sonyrx10m3remote.camera.CameraController
+import com.example.sonyrx10m3remote.data.CapturedImage
+import com.example.sonyrx10m3remote.media.MediaManager
 
 @Composable
 fun GalleryScreen(
     viewModel: GalleryViewModel = viewModel(),
     cameraController: CameraController?,
+    mediaManager: MediaManager?,
+    cameraId: String?,
     modifier: Modifier = Modifier
 ) {
     val cameraAvailable = cameraController != null
@@ -39,6 +43,7 @@ fun GalleryScreen(
     val cameraSdViewType by viewModel.cameraSdViewType.collectAsState()
     val cameraSdImages by viewModel.cameraSdImages.collectAsState()
     val cameraSdVideos by viewModel.cameraSdVideos.collectAsState()
+    val cameraSdLoading by viewModel.cameraSdLoading.collectAsState()
     val downloadedImages by viewModel.downloadedImages.collectAsState()
     val selected by viewModel.selectedImage.collectAsState()
     val mode by viewModel.mode.collectAsState()
@@ -54,12 +59,12 @@ fun GalleryScreen(
 
     // Switch camera mode when this screen is shown/hidden
     LaunchedEffect(Unit) {
-        cameraController?.let { viewModel.onGalleryOpened(it) }
+        viewModel.onGalleryOpened()
     }
 
     DisposableEffect(Unit) {
         onDispose {
-            cameraController?.let { viewModel.onGalleryClosed(it) }
+            viewModel.onGalleryClosed()
         }
     }
 
@@ -79,7 +84,7 @@ fun GalleryScreen(
                             // Maybe show a Toast or snackbar here to notify user
                             return@GalleryBottomBar
                         }
-                        viewModel.setMode(newMode, cameraController)
+                        viewModel.setMode(newMode)
                     },
                     cameraAvailable = cameraAvailable
                 )
@@ -91,21 +96,60 @@ fun GalleryScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            when {
-                shownImages.isEmpty() -> {
+            if (mode == GalleryMode.CAMERA_SD) {
+                val isImagesView = cameraSdViewType == CameraSdViewType.IMAGES
+                val items = if (isImagesView) cameraSdImages else cameraSdVideos
+
+
+                when {
+                    cameraSdLoading && items.isEmpty() -> {
+                        // full-screen loading
+                        Column(
+                            modifier = Modifier.align(Alignment.Center),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            CircularProgressIndicator()
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text("Loading... this may take a while.")
+                        }
+                    }
+                    items.isNotEmpty() -> {
+                        Box {
+                            ImageGrid(images = items, onImageClick = viewModel::selectImage)
+                            if (cameraSdLoading) {
+                                // subtle top indicator
+                                LinearProgressIndicator(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(4.dp)
+                                        .align(Alignment.TopCenter)
+                                )
+                            }
+                        }
+                    }
+                    !cameraSdLoading && items.isEmpty() -> {
+                        // no items found
+                        Column(
+                            modifier = Modifier.align(Alignment.Center),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("No images found on camera SD.")
+                        }
+                    }
+                }
+            } else {
+                if (shownImages.isEmpty()) {
                     Column(
                         modifier = Modifier.align(Alignment.Center),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         CircularProgressIndicator()
                         Spacer(modifier = Modifier.height(16.dp))
-                        Text("Loading... this may take a while.")
+                        Text("Loading...this may take a while.")
                     }
-                }
-                selected == null -> {
+                } else if (selected == null) {
                     ImageGrid(images = shownImages, onImageClick = viewModel::selectImage)
-                }
-                else -> {
+                } else {
                     FullscreenImagePager(
                         images = shownImages,
                         startImage = selected!!,
@@ -222,7 +266,7 @@ fun ImageGrid(
         modifier = Modifier.fillMaxSize(),
         state = gridState
     ) {
-        items(images, key = { it.id }) { image ->
+        items(images, key = { it.uri }) { image ->
             val model = image.localUri ?: image.thumbnailUrl ?: image.remoteUrl
             Box(
                 modifier = Modifier

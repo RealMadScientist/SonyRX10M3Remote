@@ -32,9 +32,10 @@ import com.example.sonyrx10m3remote.camera.CameraController
 import com.example.sonyrx10m3remote.camera.CameraControllerProvider
 import com.example.sonyrx10m3remote.camera.CameraController.CaptureResult
 import com.example.sonyrx10m3remote.camera.CameraDiscovery
+import com.example.sonyrx10m3remote.camera.CameraDiscovery.CameraInfo
 import com.example.sonyrx10m3remote.camera.Intervalometer
+import com.example.sonyrx10m3remote.data.CapturedImage
 import com.example.sonyrx10m3remote.media.MediaManager
-import com.example.sonyrx10m3remote.gallery.CapturedImage
 import com.example.sonyrx10m3remote.gallery.GalleryViewModel
 import com.example.sonyrx10m3remote.gallery.GalleryViewModelFactory
 import com.example.sonyrx10m3remote.gallery.SessionImageRepository
@@ -91,6 +92,7 @@ class MainActivity : AppCompatActivity() {
     private var cameraWifiNetwork: Network? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var isCameraConnected = false
+    private var discoveredCameraId: String? = null
 
     // Auto-focus flag
     private var isAutoFocusEngaged = false
@@ -328,6 +330,9 @@ class MainActivity : AppCompatActivity() {
         // Open gallery
         btnGallery.setOnClickListener {
             val intent = Intent(this, GalleryActivity::class.java)
+            discoveredCameraId?.let { cameraId ->
+                intent.putExtra("camera_id", cameraId)
+            }
             startActivity(intent)
         }
     }
@@ -400,21 +405,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     // Discover the camera's control endpoint over SSDP.
-    private suspend fun startCameraDiscovery(): String? {
+    private suspend fun startCameraDiscovery(): CameraInfo? {
         showStatus("Starting SSDP camera discovery…")
 
-        val actionListUrl = withContext(Dispatchers.IO) {
-            CameraDiscovery.discoverCameraUrl()
+        val cameraInfo = withContext(Dispatchers.IO) {
+            CameraDiscovery.discoverCameraInfo()
         }
 
-        if (actionListUrl == null) {
+        if (cameraInfo == null) {
             showStatus("Camera discovery failed or timed out")
             return null
         }
 
-        rpcBaseUrl = actionListUrl
-        showStatus("RPC base will be: $actionListUrl")
-        return actionListUrl
+        rpcBaseUrl = cameraInfo.apiUrl
+        showStatus("RPC base will be: ${cameraInfo.apiUrl}")
+
+        return cameraInfo
     }
 
     // Define data class to collect camera parameters
@@ -428,7 +434,7 @@ class MainActivity : AppCompatActivity() {
     // Wait for camera to return available f-number, ISO, shutter speed and exposure compensation settings.
     suspend fun waitForParameters(
         cameraController: CameraController,
-        timeoutMillis: Long = 10000
+        timeoutMillis: Long = 10_000L
     ): CameraParams {
         val startTime = System.currentTimeMillis()
 
@@ -438,15 +444,21 @@ class MainActivity : AppCompatActivity() {
         var expCompList = listOf<Int>()
 
         while (System.currentTimeMillis() - startTime < timeoutMillis) {
-            val infoJson = cameraController.getInfo()
+            val infoJson: JSONObject? = try {
+                cameraController.getInfo()
+            } catch (e: Exception) {
+                Log.e("MainActivity", "getInfo() threw: ${e.localizedMessage}")
+                null
+            }
+
             if (infoJson == null) {
-                delay(200)
+                delay(200L)
                 continue
             }
 
             val resultArray = infoJson.optJSONArray("result")
             if (resultArray == null) {
-                delay(200)
+                delay(200L)
                 continue
             }
 
@@ -455,48 +467,154 @@ class MainActivity : AppCompatActivity() {
             var foundFNumber = false
             var foundExpComp = false
 
+            // Temporary holders for this iteration
+            var tmpIsoList = isoList
+            var tmpShutterList = shutterList
+            var tmpFNumberList = fNumberList
+            var tmpExpCompList = expCompList
+
             for (i in 0 until resultArray.length()) {
                 val item = resultArray.optJSONObject(i) ?: continue
-
                 when (item.optString("type")) {
                     "fNumber" -> {
-                        item.optJSONArray("fNumberCandidates")?.let {
-                            fNumberList = (0 until it.length()).map { idx -> it.getString(idx) }
-                            foundFNumber = true
+                        item.optJSONArray("fNumberCandidates")?.let { arr ->
+                            val list = mutableListOf<String>()
+                            for (j in 0 until arr.length()) {
+                                val s = arr.optString(j, null)
+                                if (s != null) list.add(s)
+                            }
+                            if (list.isNotEmpty()) {
+                                tmpFNumberList = list
+                                foundFNumber = true
+                            }
                         }
                     }
                     "shutterSpeed" -> {
-                        item.optJSONArray("shutterSpeedCandidates")?.let {
-                            shutterList = (0 until it.length()).map { idx -> it.getString(idx) }
-                            foundShutter = true
+                        item.optJSONArray("shutterSpeedCandidates")?.let { arr ->
+                            val list = mutableListOf<String>()
+                            for (j in 0 until arr.length()) {
+                                val s = arr.optString(j, null)
+                                if (s != null) list.add(s)
+                            }
+                            if (list.isNotEmpty()) {
+                                tmpShutterList = list
+                                foundShutter = true
+                            }
                         }
                     }
                     "isoSpeedRate" -> {
-                        item.optJSONArray("isoSpeedRateCandidates")?.let {
-                            isoList = (0 until it.length()).map { idx -> it.getString(idx) }
-                            foundIso = true
+                        item.optJSONArray("isoSpeedRateCandidates")?.let { arr ->
+                            val list = mutableListOf<String>()
+                            for (j in 0 until arr.length()) {
+                                val s = arr.optString(j, null)
+                                if (s != null) list.add(s)
+                            }
+                            if (list.isNotEmpty()) {
+                                tmpIsoList = list
+                                foundIso = true
+                            }
                         }
                     }
                     "exposureCompensation" -> {
-                        val min = item.optInt("minExposureCompensation", 0)
-                        val max = item.optInt("maxExposureCompensation", 0)
-                        val step = item.optInt("stepIndexOfExposureCompensation", 1)
-
-                        // Build the list of raw integer step values (e.g., -9 to +9)
-                        expCompList = (min..max step step).toList()
-                        foundExpComp = true
+                        // First, check if the API provides explicit candidates array
+                        // Some camera APIs may have "exposureCompensationCandidates" or similar.
+                        val arr = item.optJSONArray("exposureCompensationCandidates")
+                        if (arr != null) {
+                            val list = mutableListOf<Int>()
+                            for (j in 0 until arr.length()) {
+                                // Could be number or string; try optInt or parse
+                                val v = try {
+                                    arr.getInt(j)
+                                } catch (_: Exception) {
+                                    // maybe it's string
+                                    val s = arr.optString(j, null)
+                                    s?.toIntOrNull() ?: continue
+                                }
+                                list.add(v)
+                            }
+                            if (list.isNotEmpty()) {
+                                tmpExpCompList = list
+                                foundExpComp = true
+                                continue  // skip range building if explicit candidates exist
+                            }
+                        }
+                        // Otherwise, fallback to min, max, step fields
+                        val min = item.optInt("minExposureCompensation", Int.MIN_VALUE)
+                        val max = item.optInt("maxExposureCompensation", Int.MAX_VALUE)
+                        var step = item.optInt("stepIndexOfExposureCompensation", 0)
+                        // Some APIs might use a different field name for step; verify documentation.
+                        // If step <= 0, fallback:
+                        if (step <= 0) {
+                            Log.w("MainActivity", "Invalid exposureCompensation step: $step; defaulting to 1")
+                            step = 1
+                        }
+                        // If min or max are not present or invalid, skip or fallback:
+                        if (min == Int.MIN_VALUE || max == Int.MAX_VALUE) {
+                            Log.w("MainActivity", "Exposure comp min/max invalid: min=$min, max=$max; skipping expComp list")
+                            tmpExpCompList = emptyList()
+                            // foundExpComp remains false, so loop continues
+                        } else if (min > max) {
+                            Log.w("MainActivity", "Exposure comp min > max ($min > $max); swapping or skipping")
+                            // Option A: swap
+                            val realMin = max
+                            val realMax = min
+                            tmpExpCompList = buildRangeList(realMin, realMax, step)
+                            foundExpComp = tmpExpCompList.isNotEmpty()
+                        } else {
+                            tmpExpCompList = buildRangeList(min, max, step)
+                            foundExpComp = tmpExpCompList.isNotEmpty()
+                        }
                     }
                 }
             }
 
+            // If all found, return
             if (foundIso && foundShutter && foundFNumber && foundExpComp) {
+                // assign to outer vars before return
+                isoList = tmpIsoList
+                shutterList = tmpShutterList
+                fNumberList = tmpFNumberList
+                expCompList = tmpExpCompList
                 return CameraParams(isoList, shutterList, fNumberList, expCompList)
             }
 
-            delay(200)
+            // Optionally, if some parameters found but not all, you could:
+            // - partially assign outer vars, so they accumulate across iterations
+            //   isoList = tmpIsoList.takeIf { foundIso } ?: isoList
+            //   shutterList = tmpShutterList.takeIf { foundShutter } ?: shutterList
+            //   fNumberList = tmpFNumberList.takeIf { foundFNumber } ?: fNumberList
+            //   expCompList = tmpExpCompList.takeIf { foundExpComp } ?: expCompList
+            // This way, you keep previously found values if API intermittently returns partial data.
+            //
+            // Example:
+            if (foundIso) isoList = tmpIsoList
+            if (foundShutter) shutterList = tmpShutterList
+            if (foundFNumber) fNumberList = tmpFNumberList
+            if (foundExpComp) expCompList = tmpExpCompList
+
+            // Wait briefly before polling again
+            delay(200L)
         }
 
-        throw TimeoutException("Timeout fetching camera parameters")
+        // Timeout reached. You can decide to:
+        // - If you have partial lists (e.g., some found but not all), return partial or throw
+        // - Here, we throw, but you could also return with defaults
+        throw TimeoutException("Timeout fetching camera parameters after $timeoutMillis ms. " +
+                "Last lists: iso=$isoList, shutter=$shutterList, fNumber=$fNumberList, expComp=$expCompList")
+    }
+
+    // Helper to build a list from min to max inclusive with positive step.
+    private fun buildRangeList(min: Int, max: Int, step: Int): List<Int> {
+        if (step <= 0) return emptyList()
+        val list = mutableListOf<Int>()
+        var v = min
+        while (v <= max) {
+            list.add(v)
+            // Prevent potential infinite loop if overflow
+            if (v > Int.MAX_VALUE - step) break
+            v += step
+        }
+        return list
     }
 
     // Parses QR code, connects to Wi-Fi, discovers camera, and connects via RPC.
@@ -517,13 +635,15 @@ class MainActivity : AppCompatActivity() {
             }
 
             showStatus("Connected to camera Wi-Fi, discovering camera...")
-            val cameraLocation = startCameraDiscovery()
-            if (cameraLocation == null) {
+            val cameraInfo = startCameraDiscovery()
+            if (cameraInfo == null) {
                 showStatus("Camera could not be found")
                 return@launch
             }
 
-            val base = rpcBaseUrl ?: cameraLocation
+            discoveredCameraId = cameraInfo.cameraId
+
+            val base = rpcBaseUrl ?: cameraInfo.apiUrl
             CameraControllerProvider.init(base)
             cameraController = CameraControllerProvider.instance
                 ?: throw IllegalStateException("CameraController instance is null after initialization")
@@ -677,7 +797,7 @@ class MainActivity : AppCompatActivity() {
                     updateFn = cameraController::setExpComp
                 )
 
-// Start live view
+                // Start live view
                 showStatus("Camera is idle. Initialising live view...")
                 val imageView = findViewById<ImageView>(R.id.liveViewImage)
                 liveViewImageView = imageView
@@ -701,14 +821,13 @@ class MainActivity : AppCompatActivity() {
                 MediaManagerProvider.instance = mediaManager
 
                 // Instantiate galleryViewModel
-                galleryViewModel = ViewModelProvider(this@MainActivity, GalleryViewModelFactory(applicationContext, mediaManager, cameraController))
+                galleryViewModel = ViewModelProvider(this@MainActivity, GalleryViewModelFactory(applicationContext, mediaManager, cameraController, discoveredCameraId))
                     .get(GalleryViewModel::class.java)
 
                 // Connect mediaManager to sessionImageRepository
                 mediaManager.sessionImageListener = object : MediaManager.SessionImageListener {
                     override fun onNewSessionImage(image: CapturedImage) {
-                        Log.d("MainActivity", "New session image received: ${image.id}")
-                        // Instead of galleryViewModel.addSessionImages, use:
+                        Log.d("MainActivity", "New session image received: ${image.uri}")
                         SessionImageRepository.addImages(listOf(image))
                     }
                 }

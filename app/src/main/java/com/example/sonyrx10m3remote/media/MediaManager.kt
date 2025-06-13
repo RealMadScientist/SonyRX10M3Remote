@@ -13,7 +13,8 @@ import android.widget.ImageView
 import androidx.exifinterface.media.ExifInterface
 import com.example.sonyrx10m3remote.camera.CameraController
 import com.example.sonyrx10m3remote.camera.CameraController.ContentItem
-import com.example.sonyrx10m3remote.gallery.CapturedImage
+import com.example.sonyrx10m3remote.data.CacheManager
+import com.example.sonyrx10m3remote.data.CapturedImage
 import com.example.sonyrx10m3remote.gallery.SessionImageRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -31,23 +32,56 @@ class MediaManager(
     private val TAG = "MediaManager"
 
     private val mediaStoreHelper = MediaStoreHelper(context)
+    private val cacheManager = CacheManager(context)
 
+    // Variable for live image cache
     private val _seenUris = mutableSetOf<String>()
-    private val _visitedDirs = mutableSetOf<String>()
     private val _cachedImages = mutableListOf<ContentItem>()
     private val _cachedVideos = mutableListOf<ContentItem>()
     val seenUris: MutableSet<String> = mutableSetOf()
     val cachedImages: List<ContentItem> get() = _cachedImages
     val cachedVideos: List<ContentItem> get() = _cachedVideos
 
-    // Variables to store media tags from the camera that have already been collected
-    fun markSeen(vararg items: ContentItem) {
-        _seenUris.addAll(items.map { it.uri })
+    // ---------------- Object Converters ----------------
+
+    // Used for converting persistent metadata into ContentItem
+    fun capturedToContentItem(item: CapturedImage): ContentItem {
+        return ContentItem(
+            uri = item.uri,
+            remoteUrl = item.remoteUrl ?: "",
+            thumbnailUrl = item.thumbnailUrl ?: "",
+            fileName = item.fileName ?: "",
+            timestamp = item.timestamp,
+            contentKind = item.contentKind ?: "image", // or "unknown"
+            lastModified = item.lastModified
+        )
     }
 
+    // Used for converting ContentItem to CapturedImage for internal app usage
+    fun contentToCaptured(item: ContentItem): CapturedImage {
+        return CapturedImage(
+            uri = item.uri,
+            remoteUrl = item.remoteUrl,
+            thumbnailUrl = item.thumbnailUrl,
+            fileName = item.fileName,
+            timestamp = item.timestamp,
+            contentKind = item.contentKind,
+            lastModified = item.lastModified
+        )
+    }
+
+    // ---------------- Live Image Cache ----------------
+
     fun addToCache(images: List<ContentItem>, videos: List<ContentItem>) {
-        _cachedImages.addAll(images)
-        _cachedVideos.addAll(videos)
+        // Filter out images with duplicate URIs
+        val existingImageUris = _cachedImages.map { it.uri }.toSet()
+        val newUniqueImages = images.filter { it.uri !in existingImageUris }
+        _cachedImages.addAll(newUniqueImages)
+
+        // Similarly for videos
+        val existingVideoUris = _cachedVideos.map { it.uri }.toSet()
+        val newUniqueVideos = videos.filter { it.uri !in existingVideoUris }
+        _cachedVideos.addAll(newUniqueVideos)
     }
 
     fun clearCache() {
@@ -55,6 +89,58 @@ class MediaManager(
         _cachedImages.clear()
         _cachedVideos.clear()
     }
+
+    // ---------------- Disk Cache ----------------
+
+    /**
+     * Load from disk cache into live cache.
+     * Clears existing live cache first, then populates from disk.
+     * Must be called from a coroutine/suspend context.
+     */
+    suspend fun loadDiskCacheIntoLive(cameraId: String) {
+        // Load list of CapturedImage from disk via CacheManager
+        val cachedCapturedItems = cacheManager.loadCachedMetadata(cameraId)
+        Log.d(TAG, "Loaded ${cachedCapturedItems.size} items from disk cache for camera $cameraId")
+
+        // Clear current live cache
+        clearCache()
+
+        // Populate live cache
+        cachedCapturedItems
+            .distinctBy { it.uri }
+            .forEach { captured ->
+                val item = capturedToContentItem(captured)
+                when (item.contentKind?.lowercase()) {
+                    "still", "image" -> _cachedImages.add(item)
+                    "video", "movie" -> _cachedVideos.add(item)
+                    else -> _cachedImages.add(item)
+                }
+                _seenUris.add(item.uri)
+            }
+    }
+
+    /**
+     * Persist current live cache to disk.
+     * Must be called from a coroutine/suspend context.
+     */
+    suspend fun saveLiveCacheToDisk(cameraId: String) {
+        // Convert all live cache items to CapturedImage
+        val allItems = (_cachedImages + _cachedVideos).map { contentToCaptured(it) }
+        cacheManager.saveCachedMetadata(cameraId, allItems)
+        Log.d(TAG, "Saved ${allItems.size} live cache items to disk for camera $cameraId")
+    }
+
+    /**
+     * Clear disk cache for this cameraId.
+     * Must be called from coroutine/suspend context or wrapped in withContext(Dispatchers.IO).
+     */
+    suspend fun clearDiskCache(cameraId: String) {
+        // Option A: delete entire folder
+        cacheManager.clearCache(cameraId)
+        Log.d(TAG, "Cleared disk cache for camera $cameraId")
+    }
+
+    // ---------------- Session Media Handler ----------------
 
     // Listener interface for new session images
     interface SessionImageListener {
@@ -71,9 +157,9 @@ class MediaManager(
 
             // Notify listener with a new CapturedImage for session gallery
             val sessionImage = CapturedImage(
-                id = mediaInfo.filename,
+                uri = mediaInfo.filename,
                 remoteUrl = mediaInfo.fullImageUrl,
-                timestamp = System.currentTimeMillis()
+                lastModified = System.currentTimeMillis()
             )
             sessionImageListener?.onNewSessionImage(sessionImage)
         }
@@ -90,7 +176,8 @@ class MediaManager(
         }
     }
 
-    // ----- Preview Image Decoding Helpers -----
+    // ---------------- Preview Image Decoding Helpers ----------------
+
     fun loadPreviewBitmap(imageFile: File, targetWidth: Int, targetHeight: Int): Bitmap {
         val options = BitmapFactory.Options().apply {
             inJustDecodeBounds = true
@@ -128,7 +215,7 @@ class MediaManager(
 
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
-    // ----------
+    // ---------------- Downloading and Displaying Previews ----------------
 
     private suspend fun downloadPreview(url: String): File? = withContext(Dispatchers.IO) {
         return@withContext try {

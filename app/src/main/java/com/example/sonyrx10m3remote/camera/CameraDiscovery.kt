@@ -18,11 +18,16 @@ object CameraDiscovery {
     private const val SSDP_MX = 3
     private const val SEARCH_TARGET = "urn:schemas-sony-com:service:ScalarWebAPI:1"
 
+    data class CameraInfo(
+        val apiUrl: String,
+        val cameraId: String
+    )
+
     /**
      * Sends an SSDP M-SEARCH, gets LOCATION URL,
      * then fetches and parses XML at LOCATION to extract real camera API URL.
      */
-    suspend fun discoverCameraUrl(): String? = withContext(Dispatchers.IO) {
+    suspend fun discoverCameraInfo(): CameraInfo? = withContext(Dispatchers.IO) {
         try {
             // SSDP discovery
             val socket = DatagramSocket()
@@ -51,6 +56,7 @@ object CameraDiscovery {
             Log.d("CameraDiscovery", "SSDP response:\n$response")
             socket.close()
 
+            // Extract LOCATION URL
             val locationLine = response.lines()
                 .firstOrNull { it.lowercase().startsWith("location:") }
             val locationUrl = locationLine
@@ -64,12 +70,32 @@ object CameraDiscovery {
                 return@withContext null
             }
 
+            // Extract USN header and parse cameraId UUID
+            val usnLine = response.lines()
+                .firstOrNull { it.lowercase().startsWith("usn:") }
+            val usn = usnLine?.substringAfter(":", "")?.trim() ?: ""
+            val cameraId = usn.substringAfter("uuid:", "").substringBefore("::")
+
+            Log.d("CameraDiscovery", "Extracted cameraId from USN: $cameraId")
+
+            if (cameraId.isEmpty()) {
+                Log.e("CameraDiscovery", "No valid cameraId found in USN header")
+                return@withContext null
+            }
+
             // Fetch the XML from LOCATION URL
             val xmlContent = URL(locationUrl).readText()
             Log.d("CameraDiscovery", "Downloaded XML from LOCATION")
 
             // Parse XML to get real camera API URL
-            return@withContext parseCameraApiUrl(xmlContent)
+            val apiUrl = parseCameraApiUrl(xmlContent)
+
+            if (apiUrl.isNullOrEmpty()) {
+                Log.e("CameraDiscovery", "Failed to parse API URL from XML")
+                return@withContext null
+            }
+
+            return@withContext CameraInfo(apiUrl, cameraId)
         } catch (e: Exception) {
             Log.e("CameraDiscovery", "Discovery failed: ${e.message}")
             return@withContext null

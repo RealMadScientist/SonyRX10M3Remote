@@ -600,10 +600,11 @@ class CameraController(baseUrl: String) {
         val thumbnailUrl: String,
         val remoteUrl: String,
         val fileName: String,
-        val lastModified: Long = 0L // epoch millis; default 0 if unknown
+        val timestamp: Long = 0L,
+        val lastModified: Long = 0L
     ) {
         override fun toString(): String {
-            return "ContentItem(uri='$uri', kind='$contentKind', filename='$fileName', lastModified=$lastModified)"
+            return "ContentItem(uri='$uri', kind='$contentKind', filename='$fileName', timestamp=$timestamp, lastModified=$lastModified)"
         }
     }
 
@@ -631,7 +632,7 @@ class CameraController(baseUrl: String) {
                 return emptyList()
             }
 
-            Log.d(TAG, "getContentList: response (stIdx=$stIdx, cnt=$cnt) = $response")
+//            Log.d(TAG, "getContentList: response (stIdx=$stIdx, cnt=$cnt) = $response")
             parseContentItems(response)
         } catch (e: Exception) {
             Log.e(TAG, "getContentList error: ${e.localizedMessage}")
@@ -657,7 +658,7 @@ class CameraController(baseUrl: String) {
             var jpegFilename = ""
 
             val createdTimeString = itemObj.optString("createdTime", "")
-            val lastModified = parseIso8601ToMillis(createdTimeString)
+            val timestamp = parseIso8601ToMillis(createdTimeString)
 
             if (contentObj != null) {
                 val originalArray = contentObj.optJSONArray("original")
@@ -680,7 +681,8 @@ class CameraController(baseUrl: String) {
                     fileName = jpegFilename,
                     thumbnailUrl = thumbnailUrl,
                     remoteUrl = jpegUrl,
-                    lastModified = lastModified
+                    timestamp = timestamp,
+                    lastModified = System.currentTimeMillis()
                 )
             )
         }

@@ -18,14 +18,18 @@ class GalleryActivity : ComponentActivity() {
         val mediaManager = MediaManagerProvider.instance
         val cameraController = CameraControllerProvider.instance
 
+        val cameraId = intent.getStringExtra("camera_id")
+
         setContent {
             RX10M3RemoteTheme {
                 val viewModel: GalleryViewModel = viewModel(
-                    factory = GalleryViewModelFactory(applicationContext, mediaManager, cameraController)
+                    factory = GalleryViewModelFactory(applicationContext, mediaManager, cameraController, cameraId)
                 )
 
                 GalleryScreen(viewModel = viewModel,
-                    cameraController = CameraControllerProvider.instance)
+                    cameraController = CameraControllerProvider.instance,
+                    mediaManager = MediaManagerProvider.instance,
+                    cameraId = cameraId)
             }
         }
     }

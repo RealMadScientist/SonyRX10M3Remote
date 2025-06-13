@@ -11,22 +11,12 @@ import com.example.sonyrx10m3remote.media.MediaManager
 import com.example.sonyrx10m3remote.media.MediaStoreHelper
 import com.example.sonyrx10m3remote.camera.CameraController
 import com.example.sonyrx10m3remote.camera.CameraController.ContentItem
+import com.example.sonyrx10m3remote.data.CapturedImage
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.flow.collect
-
-data class CapturedImage(
-    val id: String,
-    val remoteUrl: String? = null,
-    val thumbnailUrl: String? = null,
-    val localUri: Uri? = null,
-    val timestamp: Long = System.currentTimeMillis(),
-    val downloaded: Boolean = false,
-    val filename: String? = null
-)
 
 enum class GalleryMode {
     SESSION,
@@ -42,7 +32,8 @@ enum class CameraSdViewType {
 class GalleryViewModel(
     private val context: Context,
     private val mediaManager: MediaManager?,
-    private val cameraController: CameraController?
+    private val cameraController: CameraController?,
+    private val cameraId: String?
 ) : ViewModel() {
     private val mediaStoreHelper = MediaStoreHelper(context)
 
@@ -57,6 +48,9 @@ class GalleryViewModel(
 
     private val _cameraSdViewType = MutableStateFlow(CameraSdViewType.IMAGES)
     val cameraSdViewType: StateFlow<CameraSdViewType> = _cameraSdViewType
+
+    private val _cameraSdLoading = MutableStateFlow(false)
+    val cameraSdLoading: StateFlow<Boolean> = _cameraSdLoading
 
     private val _downloadedImages = MutableStateFlow<List<CapturedImage>>(emptyList())
     val downloadedImages: StateFlow<List<CapturedImage>> = _downloadedImages
@@ -76,23 +70,46 @@ class GalleryViewModel(
         }
     }
 
-    fun onGalleryOpened(cameraController: CameraController?) {
-        if (cameraController == null) return
-
+    fun onGalleryOpened() {
         viewModelScope.launch {
-            try {
-                cameraController.waitForIdleStatus()
-                val success = cameraController.setCameraFunction("Contents Transfer")
-                if (!success) {
-                    Log.e("GalleryViewModel", "Failed to set camera function to Contents Transfer")
+            // Set camera mode to Contents Transfer
+            if (cameraController != null) {
+                try {
+                    cameraController.waitForIdleStatus()
+                    val success = cameraController.setCameraFunction("Contents Transfer")
+                    if (!success) {
+                        Log.e("GalleryViewModel", "Failed to set camera function to Contents Transfer")
+                    }
+                } catch (e: Exception) {
+                    Log.e("GalleryViewModel", "Error setting camera function to Contents Transfer: ${e.localizedMessage}")
                 }
-            } catch (e: Exception) {
-                Log.e("GalleryViewModel", "Error setting camera function to Contents Transfer: ${e.localizedMessage}")
+            }
+
+            // If a camera is connected, load the associated disk cache
+            if (mediaManager != null && !cameraId.isNullOrEmpty()) {
+                try {
+                    mediaManager.loadDiskCacheIntoLive(cameraId!!)
+                    // Update UI StateFlows so cached thumbnails show immediately:
+                    _cameraSdImages.value = mediaManager.cachedImages
+                        .asSequence()
+                        .distinctBy { it.uri }
+                        .sortedBy { it.timestamp }
+                        .map { mediaManager.contentToCaptured(it) }
+                        .toList()
+                    _cameraSdVideos.value = mediaManager.cachedVideos
+                        .asSequence()
+                        .distinctBy { it.uri }
+                        .sortedBy { it.timestamp }
+                        .map { mediaManager.contentToCaptured(it) }
+                        .toList()
+                } catch (e: Exception) {
+                    Log.e("GalleryViewModel", "Error loading disk cache: ${e.localizedMessage}")
+                }
             }
         }
     }
 
-    fun onGalleryClosed(cameraController: CameraController?) {
+    fun onGalleryClosed() {
         if (cameraController == null) return
 
         viewModelScope.launch {
@@ -123,11 +140,11 @@ class GalleryViewModel(
         _selectedImage.value = image
     }
 
-    fun setMode(newMode: GalleryMode, cameraController: CameraController? = null) {
+    fun setMode(newMode: GalleryMode) {
         _mode.value = newMode
         when (newMode) {
             GalleryMode.DOWNLOADED -> loadDownloadedImages()
-            GalleryMode.CAMERA_SD -> cameraController?.let { loadCameraSdImages(it) }
+            GalleryMode.CAMERA_SD -> loadCameraSdImages()
             else -> {}
         }
     }
@@ -137,20 +154,20 @@ class GalleryViewModel(
     }
 
     // Iteratively runs getContentList() to search through the directory structure of camera storage for image/video files
-    fun loadCameraSdImages(cameraController: CameraController) {
-        if (mediaManager == null) {
+    fun loadCameraSdImages() {
+        if (mediaManager == null || cameraController == null || cameraId.isNullOrBlank()) {
             Log.e("GalleryViewModel", "mediaManager is null. Cannot load camera SD images.")
             return
         }
 
         viewModelScope.launch {
+            _cameraSdLoading.value = true
             try {
                 val rootUri = "storage:memoryCard1"
                 val newImages = mutableListOf<ContentItem>()
                 val newVideos = mutableListOf<ContentItem>()
 
                 loadMediaRecursively(
-                    cameraController = cameraController,
                     uri = rootUri,
                     images = newImages,
                     videos = newVideos
@@ -161,38 +178,38 @@ class GalleryViewModel(
 
                 // Update state flows with sorted + mapped images/videos
                 _cameraSdImages.value = mediaManager.cachedImages
-                    .sortedBy { it.lastModified }
-                    .map { item ->
-                        CapturedImage(
-                            id = item.uri,
-                            remoteUrl = item.remoteUrl,
-                            thumbnailUrl = item.thumbnailUrl,
-                            filename = item.fileName
-                        )
-                    }
+                    .asSequence()
+                    .distinctBy { it.uri }
+                    .sortedBy { it.timestamp }
+                    .map { mediaManager.contentToCaptured(it) }
+                    .toList()
 
                 _cameraSdVideos.value = mediaManager.cachedVideos
-                    .sortedBy { it.lastModified }
-                    .map { item ->
-                        CapturedImage(
-                            id = item.uri,
-                            remoteUrl = item.remoteUrl,
-                            thumbnailUrl = item.thumbnailUrl,
-                            filename = item.fileName
-                        )
-                    }
+                    .asSequence()
+                    .distinctBy { it.uri }
+                    .sortedBy { it.timestamp }
+                    .map { mediaManager.contentToCaptured(it) }
+                    .toList()
+
+                // Persist to disk if we have a cameraId
+                if (!cameraId.isNullOrBlank()) {
+                    mediaManager.saveLiveCacheToDisk(cameraId)
+                } else {
+                    Log.w("GalleryViewModel", "cameraId is null/blank; skipping disk cache save")
+                }
 
             } catch (e: Exception) {
                 Log.e("GalleryViewModel", "Failed to load Camera SD media: ${e.localizedMessage}")
                 _cameraSdImages.value = emptyList()
                 _cameraSdVideos.value = emptyList()
+            } finally {
+                _cameraSdLoading.value = false
             }
         }
     }
 
     // Helper function to for recursive search through getContentList
     private suspend fun loadMediaRecursively(
-        cameraController: CameraController,
         uri: String,
         images: MutableList<ContentItem>,
         videos: MutableList<ContentItem>,
@@ -200,15 +217,15 @@ class GalleryViewModel(
         maxDepth: Int = 10,
         pageSize: Int = 100
     ) {
-        if (mediaManager == null) {
-            Log.e("GalleryViewModel", "mediaManager is null. Cannot load camera SD images.")
+        if (mediaManager == null || cameraController == null) {
+            Log.e("GalleryViewModel", "Camera not connected. Cannot load camera SD images.")
             return
         }
 
-        Log.d("GalleryViewModel", "Recursing into $uri at depth $currentDepth")
+//        Log.d("GalleryViewModel", "Recursing into $uri at depth $currentDepth")
 
         if (currentDepth > maxDepth) {
-            Log.w("GalleryViewModel", "Max recursion depth reached at URI: $uri")
+//            Log.w("GalleryViewModel", "Max recursion depth reached at URI: $uri")
             return
         }
 
@@ -219,10 +236,10 @@ class GalleryViewModel(
 
         while (true) {
             val contents = cameraController.getContentList(uri = uri, stIdx = startIndex, cnt = pageSize)
-            Log.d("GalleryViewModel", "getContentList($uri, $startIndex, $pageSize) returned ${contents.size} items")
+//            Log.d("GalleryViewModel", "getContentList($uri, $startIndex, $pageSize) returned ${contents.size} items")
 
             if (contents.isEmpty()) {
-                Log.d("GalleryViewModel", "No more contents at $uri, breaking loop")
+//                Log.d("GalleryViewModel", "No more contents at $uri, breaking loop")
                 break
             }
 
@@ -257,7 +274,7 @@ class GalleryViewModel(
             directories.addAll(dirs)
 
             if (contents.size < pageSize) {
-                Log.d("GalleryViewModel", "Last page of contents received (< pageSize), breaking loop")
+//                Log.d("GalleryViewModel", "Last page of contents received (< pageSize), breaking loop")
                 break
             }
 
@@ -277,8 +294,8 @@ class GalleryViewModel(
         }
 
         for (dir in dirsToVisit) {
-            Log.d("GalleryViewModel", "Recursing into subdirectory: ${dir.uri}")
-            loadMediaRecursively(cameraController, dir.uri, images, videos, currentDepth + 1, maxDepth, pageSize)
+//            Log.d("GalleryViewModel", "Recursing into subdirectory: ${dir.uri}")
+            loadMediaRecursively(dir.uri, images, videos, currentDepth + 1, maxDepth, pageSize)
         }
     }
 
@@ -288,7 +305,7 @@ class GalleryViewModel(
             Log.d("GalleryViewModel", "Loaded ${uris.size} downloaded images")
             _downloadedImages.value = uris.map { uri ->
                 CapturedImage(
-                    id = uri.toString(),
+                    uri = uri.toString(),
                     localUri = uri
                 )
             }
@@ -304,12 +321,13 @@ class GalleryViewModel(
 class GalleryViewModelFactory(
     private val context: Context,
     private val mediaManager: MediaManager?,
-    private val cameraController: CameraController?
+    private val cameraController: CameraController?,
+    private val cameraId: String?
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(GalleryViewModel::class.java)) {
-            return GalleryViewModel(context, mediaManager, cameraController) as T
+            return GalleryViewModel(context, mediaManager, cameraController, cameraId) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }
