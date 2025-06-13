@@ -1,10 +1,10 @@
 package com.example.sonyrx10m3remote.gallery
 
 import android.net.Uri
-import android.util.Log
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyGridState
@@ -13,7 +13,9 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PhotoLibrary
@@ -25,6 +27,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
@@ -38,7 +41,8 @@ fun GalleryScreen(
     cameraController: CameraController?,
     mediaManager: MediaManager?,
     cameraId: String?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onDownloadSelected: () -> Unit
 ) {
     val cameraAvailable = cameraController != null
 
@@ -53,6 +57,12 @@ fun GalleryScreen(
     val selected by viewModel.selectedImage.collectAsState()
     val mode by viewModel.mode.collectAsState()
     val thumbnailCache by mediaManager?.thumbnailCache?.collectAsState() ?: remember { mutableStateOf(emptyMap()) }
+
+    val chosenImages by viewModel.chosenImages.collectAsState()
+    val capturedImages by viewModel.capturedImages.collectAsState()
+    val showPopup by viewModel.showIntervalPopup.collectAsState()
+    val isDownloading by viewModel.isDownloading.collectAsState()
+    val isInSelectionMode by viewModel.isInSelectionMode.collectAsState()
 
     val shownImages = when (mode) {
         GalleryMode.SESSION -> images
@@ -89,10 +99,36 @@ fun GalleryScreen(
         bottomBar = {
             Column {
                 if (mode == GalleryMode.CAMERA_SD) {
-                    CameraSdTypeToggle(
-                        selectedType = cameraSdViewType,
-                        onSelectType = viewModel::setCameraSdViewType
-                    )
+                    if (isInSelectionMode) {
+                        // 🔁 Replace toggle with selection buttons
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(8.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            Button(
+                                onClick = { viewModel.exitSelectionMode() },
+                                modifier = Modifier.weight(1f).padding(end = 4.dp)
+                            ) {
+                                Text("Cancel")
+                            }
+
+                            Button(
+                                onClick = onDownloadSelected,
+                                modifier = Modifier.weight(1f).padding(start = 4.dp),
+                                enabled = chosenImages.isNotEmpty()
+                            ) {
+                                Text("Download (${chosenImages.size})")
+                            }
+                        }
+                    } else {
+                        // 📷 Show Images/Videos toggle when not selecting
+                        CameraSdTypeToggle(
+                            selectedType = cameraSdViewType,
+                            onSelectType = viewModel::setCameraSdViewType
+                        )
+                    }
                 }
                 GalleryBottomBar(
                     currentMode = mode,
@@ -144,10 +180,24 @@ fun GalleryScreen(
                                         thumbnailCache = thumbnailCache,
                                         gridState = gridState,
                                         onImageClick = { image ->
-                                            // Save current scroll before fullscreen
-                                            lastScrollIndex.value = gridState.firstVisibleItemIndex
-                                            viewModel.selectImage(image)
-                                        }
+                                            if (!isInSelectionMode) {
+                                                lastScrollIndex.value = gridState.firstVisibleItemIndex
+                                                viewModel.selectImage(image)
+                                            }
+                                        },
+                                        onSelectImage = { image, selected ->
+                                            if (isInSelectionMode) {
+                                                viewModel.updateChosenImage(image, selected)
+                                            }
+                                        },
+                                        onLongClick = { image ->
+                                            if (!isInSelectionMode) {
+                                                viewModel.enterSelectionMode()
+                                            }
+                                        },
+                                        selectedImages = chosenImages,
+                                        selectionEnabled = isInSelectionMode,
+                                        isDownloading = isDownloading
                                     )
                                     if (cameraSdLoading) {
                                         // subtle top indicator
@@ -255,6 +305,22 @@ fun GalleryScreen(
             }
         }
     }
+
+    if (showPopup) {
+        IntervalCapturedImagesPopup(
+            images = capturedImages,
+            selectedImages = chosenImages,
+            onDismiss = { viewModel.dismissIntervalPopup() },
+            onConfirmDownload = {
+                onDownloadSelected()
+                viewModel.dismissIntervalPopup()
+            },
+            onSelectImage = { image, selected ->
+                viewModel.updateChosenImage(image, selected)
+            },
+            isDownloading = isDownloading
+        )
+    }
 }
 
 @Composable
@@ -265,21 +331,42 @@ fun CameraSdTypeToggle(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(vertical = 8.dp),
-        horizontalArrangement = Arrangement.Center
+            .padding(8.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly
     ) {
-        SegmentedButton(
-            text = "Images",
-            selected = selectedType == CameraSdViewType.IMAGES,
-            onClick = { onSelectType(CameraSdViewType.IMAGES) }
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        SegmentedButton(
-            text = "Videos",
-            selected = selectedType == CameraSdViewType.VIDEOS,
-            onClick = { onSelectType(CameraSdViewType.VIDEOS) }
-        )
+        Button(
+            onClick = { onSelectType(CameraSdViewType.IMAGES) },
+            modifier = Modifier.weight(1f).padding(end = 4.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (selectedType == CameraSdViewType.IMAGES)
+                    MaterialTheme.colorScheme.primary
+                else
+                    MaterialTheme.colorScheme.surfaceVariant,
+                contentColor = if (selectedType == CameraSdViewType.IMAGES)
+                    MaterialTheme.colorScheme.onPrimary
+                else
+                    MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        ) {
+            Text("Images")
+        }
+
+        Button(
+            onClick = { onSelectType(CameraSdViewType.VIDEOS) },
+            modifier = Modifier.weight(1f).padding(start = 4.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (selectedType == CameraSdViewType.VIDEOS)
+                    MaterialTheme.colorScheme.primary
+                else
+                    MaterialTheme.colorScheme.surfaceVariant,
+                contentColor = if (selectedType == CameraSdViewType.VIDEOS)
+                    MaterialTheme.colorScheme.onPrimary
+                else
+                    MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        ) {
+            Text("Videos")
+        }
     }
 }
 
@@ -342,20 +429,22 @@ fun GalleryBottomBar(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ImageGrid(
     images: List<CapturedImage>,
     thumbnailCache: Map<String, Uri>,
     gridState: LazyGridState,
-    onImageClick: (CapturedImage) -> Unit
+    onImageClick: (CapturedImage) -> Unit,
+    onLongClick: (CapturedImage) -> Unit = {}, // default no-op
+    selectedImages: Set<CapturedImage> = emptySet(),
+    onSelectImage: (CapturedImage, Boolean) -> Unit = { _, _ -> },
+    isDownloading: Boolean = false,
+    selectionEnabled: Boolean = false
 ) {
-    // Auto scroll to bottom only if not restoring scroll:
     LaunchedEffect(images.size) {
-        if (images.isNotEmpty()) {
-            // Only scroll to bottom if user hasn't requested a manual restore
-            if (gridState.firstVisibleItemIndex == 0) {
-                gridState.scrollToItem(images.size - 1)
-            }
+        if (images.isNotEmpty() && gridState.firstVisibleItemIndex == 0) {
+            gridState.scrollToItem(images.size - 1)
         }
     }
 
@@ -367,13 +456,29 @@ fun ImageGrid(
     ) {
         items(images, key = { it.uri }) { image ->
             val model = thumbnailCache[image.uri] ?: image.localUri ?: image.thumbnailUrl ?: image.remoteUrl
+            val isSelected = selectedImages.contains(image)
+
             Box(
                 modifier = Modifier
                     .padding(4.dp)
                     .aspectRatio(1f)
-                    .clickable {
-                        onImageClick(image)
-                    }
+                    .combinedClickable(
+                        onClick = {
+                            if (isDownloading) return@combinedClickable // ignore clicks during download
+
+                            if (selectionEnabled) {
+                                // Toggle selection state
+                                onSelectImage(image, !isSelected)
+                            } else {
+                                // Normal image click
+                                onImageClick(image)
+                            }
+                        },
+                        onLongClick = {
+                            if (isDownloading) return@combinedClickable
+                            onLongClick(image)
+                        }
+                    )
             ) {
                 if (model != null) {
                     AsyncImage(
@@ -393,6 +498,33 @@ fun ImageGrid(
                         contentAlignment = Alignment.Center
                     ) {
                         Text("No preview", color = Color.White)
+                    }
+                }
+
+                // Overlay selection check if selected
+                if (isSelected) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.5f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = "Selected",
+                            tint = Color.White
+                        )
+                    }
+                }
+
+                if (isDownloading) {
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .background(Color.Black.copy(alpha = 0.5f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
                     }
                 }
             }
@@ -447,6 +579,101 @@ fun FullscreenImagePager(
                 .padding(16.dp)
         ) {
             Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+        }
+    }
+}
+
+@Composable
+fun IntervalCapturedImagesPopup(
+    images: List<CapturedImage>,
+    selectedImages: Set<CapturedImage>,
+    onDismiss: () -> Unit,
+    onConfirmDownload: () -> Unit,
+    onSelectImage: (CapturedImage, Boolean) -> Unit,
+    isDownloading: Boolean
+) {
+    Dialog(onDismissRequest = { if (!isDownloading) onDismiss() }) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .wrapContentHeight()
+        ) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = Color.Black,
+                modifier = Modifier.align(Alignment.Center)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Captured Images", style = MaterialTheme.typography.titleMedium, color = Color.White)
+                    Spacer(Modifier.height(8.dp))
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(3),
+                        modifier = Modifier.height(300.dp)
+                    ) {
+                        items(images, key = { it.uri }) { image ->
+                            val model = image.localUri ?: image.thumbnailUrl ?: image.remoteUrl
+                            Box(
+                                modifier = Modifier
+                                    .padding(4.dp)
+                                    .aspectRatio(1f)
+                                    .clickable(enabled = !isDownloading) {
+                                        val isSelected = selectedImages.contains(image)
+                                        onSelectImage(image, !isSelected)
+                                    }
+                            ) {
+                                AsyncImage(
+                                    model = model,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                if (selectedImages.contains(image)) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(Color.Black.copy(alpha = 0.5f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = "Selected",
+                                            tint = Color.White
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.End,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        TextButton(
+                            onClick = onDismiss,
+                            enabled = !isDownloading
+                        ) { Text("Cancel", color = Color.White) }
+
+                        Spacer(Modifier.width(8.dp))
+
+                        Button(
+                            onClick = onConfirmDownload,
+                            enabled = !isDownloading
+                        ) { Text("Download Selected", color = Color.White) }
+                    }
+                }
+            }
+
+            if (isDownloading) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(Color.Black.copy(alpha = 0.5f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator()
+                }
+            }
         }
     }
 }

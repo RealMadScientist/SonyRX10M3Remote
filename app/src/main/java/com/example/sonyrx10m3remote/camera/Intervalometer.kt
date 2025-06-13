@@ -1,5 +1,10 @@
 package com.example.sonyrx10m3remote.camera
 
+import android.util.Log
+import com.example.sonyrx10m3remote.camera.CameraController.CaptureResult
+import com.example.sonyrx10m3remote.data.CapturedImage
+import java.util.concurrent.TimeoutException
+import kotlin.system.measureTimeMillis
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -9,8 +14,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.TimeoutException
-import kotlin.system.measureTimeMillis
 
 /**
  * Intervalometer handles both burst (continuous) and interval shooting modes.
@@ -21,16 +24,17 @@ import kotlin.system.measureTimeMillis
 class Intervalometer(
     private val cameraController: CameraController,
     private val onStatusUpdate: (String) -> Unit,
-    private val onFinished: () -> Unit,
+    private val onFinished: (List<CapturedImage>) -> Unit,
     private val getShutterSpeed: () -> String,
     private val startBulb: suspend () -> Boolean,
     private val stopBulb: suspend () -> Boolean,
-    private val performTimedCapture: (Long) -> Unit,
+    private val performTimedCapture: suspend (Long) -> CaptureResult,
     private val getBulbDurationMs: () -> Long,
     private val onError: (String) -> Unit,
     private val onProgressUpdate: (Int, Int?) -> Unit
 ) {
     private val TAG = "Intervalometer"
+    private val capturedImages = mutableListOf<CapturedImage>()
 
     // Job for the shooting coroutine, to control cancellation
     private var job: Job? = null
@@ -92,15 +96,21 @@ class Intervalometer(
             return
         }
         isRunning = true
+        capturedImages.clear()
 
         // Launch the main shooting coroutine on background thread
         job = CoroutineScope(Dispatchers.Default).launch {
-            if (intervalMs == 0L) {
-                // Burst mode (continuous shooting)
-                runBurstMode(totalShots, contShootingMode)
-            } else {
-                // Interval shooting mode
-                runIntervalMode(intervalMs, totalShots)
+            try {
+                if (intervalMs == 0L) {
+                    runBurstMode(totalShots, contShootingMode)
+                } else {
+                    runIntervalMode(intervalMs, totalShots)
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    onFinished(capturedImages.toList())
+                    Log.d("Intervalometer", "Job complete with ${capturedImages.size} images")
+                }
             }
         }
     }
@@ -145,7 +155,8 @@ class Intervalometer(
                 job?.cancel()
                 isRunning = false
                 onStatusUpdate("Intervalometer stopped")
-                onFinished()
+                onFinished(capturedImages.toList())
+                Log.d("Intervalometer", "Job complete with ${capturedImages.size} images")
             }
         }
     }
@@ -328,6 +339,25 @@ class Intervalometer(
     }
 
     /**
+     * Modified to capture stills and accumulate CapturedImage results.
+     */
+    private fun accumulateCaptureResult(result: CameraController.CaptureResult) {
+        if (result.success && result.imageUrls.isNotEmpty()) {
+            result.imageUrls.forEach { url ->
+                capturedImages.add(
+                    CapturedImage(
+                        uri = url,
+                        remoteUrl = url,
+                        lastModified = System.currentTimeMillis()
+                    )
+                )
+            }
+        } else {
+            onError("Capture failed during interval sequence")
+        }
+    }
+
+    /**
      * Performs a single shot, either bulb or normal.
      *
      * Updates progress and reports errors.
@@ -361,17 +391,19 @@ class Intervalometer(
             }
 
         } else {
-            // For shutter speeds over 1 second, use timed capture function
             val shutterDurationMs = cameraController.currentShutterDurationMs ?: 0L
-            if (shutterDurationMs > 1000L) {
+
+            val result = if (shutterDurationMs > 1000L) {
                 performTimedCapture(shutterDurationMs)
             } else {
-                cameraController.takePicture()
+                cameraController.captureStill()
             }
+            accumulateCaptureResult(result)
         }
 
         onProgressUpdate(shotNumber, totalShots)
     }
+
 
     /**
      * Delays for the remainder of the interval after accounting for shot time.

@@ -8,12 +8,19 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.sonyrx10m3remote.media.MediaManager
+import com.example.sonyrx10m3remote.media.MediaManager.MediaInfo
 import com.example.sonyrx10m3remote.media.MediaStoreHelper
 import com.example.sonyrx10m3remote.camera.CameraController
 import com.example.sonyrx10m3remote.camera.CameraController.ContentItem
 import com.example.sonyrx10m3remote.data.CapturedImage
+import java.net.URLDecoder
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -37,18 +44,21 @@ class GalleryViewModel(
 ) : ViewModel() {
     private val mediaStoreHelper = MediaStoreHelper(context)
 
+    // StateFlows holding images from Session, Camera SD and Downloaded modes
     private val _sessionImages = MutableStateFlow<List<CapturedImage>>(emptyList())
     val sessionImages: StateFlow<List<CapturedImage>> = _sessionImages
-
     private val _cameraSdImages = MutableStateFlow<List<CapturedImage>>(emptyList())
     val cameraSdImages: StateFlow<List<CapturedImage>> = _cameraSdImages
-
     private val _cameraSdVideos = MutableStateFlow<List<CapturedImage>>(emptyList())
     val cameraSdVideos: StateFlow<List<CapturedImage>> = _cameraSdVideos
+    private val _downloadedImages = MutableStateFlow<List<CapturedImage>>(emptyList())
+    val downloadedImages: StateFlow<List<CapturedImage>> = _downloadedImages
 
+    // StateFlow holding the current view type (image or video)
     private val _cameraSdViewType = MutableStateFlow(CameraSdViewType.IMAGES)
     val cameraSdViewType: StateFlow<CameraSdViewType> = _cameraSdViewType
 
+    // StateFlows holding the loading status of processes
     private val _sessionLoading = MutableStateFlow(true)
     val sessionLoading: StateFlow<Boolean> = _sessionLoading
     private val _cameraSdLoading = MutableStateFlow(false)
@@ -56,14 +66,25 @@ class GalleryViewModel(
     private val _downloadedLoading = MutableStateFlow(true)
     val downloadedLoading: StateFlow<Boolean> = _downloadedLoading
 
-    private val _downloadedImages = MutableStateFlow<List<CapturedImage>>(emptyList())
-    val downloadedImages: StateFlow<List<CapturedImage>> = _downloadedImages
+    // StateFlows holding images collected by an intervalometer job to display for choosing
+    private val _capturedImages = MutableStateFlow<List<CapturedImage>>(emptyList())
+    val capturedImages: StateFlow<List<CapturedImage>> = _capturedImages    // Tracks selected images for download
+    private val _chosenImages = MutableStateFlow<Set<CapturedImage>>(emptySet())
+    val chosenImages: StateFlow<Set<CapturedImage>> = _chosenImages
+    private val _showIntervalPopup = MutableStateFlow(false)
+    val showIntervalPopup: StateFlow<Boolean> = _showIntervalPopup.asStateFlow()
+    private val _isDownloading = MutableStateFlow(false)
+    val isDownloading: StateFlow<Boolean> = _isDownloading.asStateFlow()
 
+    // StateFlow holding the image currently selected in the gallery
     private val _selectedImage = MutableStateFlow<CapturedImage?>(null)
     val selectedImage: StateFlow<CapturedImage?> = _selectedImage
 
+    // StateFlow holding the current gallery mode (Session, Camera SD or Downloaded)
     private val _mode = MutableStateFlow(GalleryMode.SESSION)
     val mode: StateFlow<GalleryMode> = _mode
+    private val _isInSelectionMode = MutableStateFlow(false)
+    val isInSelectionMode: StateFlow<Boolean> = _isInSelectionMode
 
     init {
         _sessionLoading.value = true
@@ -145,6 +166,15 @@ class GalleryViewModel(
     fun selectImage(image: CapturedImage?) {
         Log.d("GalleryViewModel", "selectImage called with $image")
         _selectedImage.value = image
+    }
+
+    fun enterSelectionMode() {
+        _isInSelectionMode.value = true
+    }
+
+    fun exitSelectionMode() {
+        _isInSelectionMode.value = false
+        _chosenImages.value = emptySet()
     }
 
     fun setMode(newMode: GalleryMode) {
@@ -336,6 +366,81 @@ class GalleryViewModel(
         _sessionImages.value = emptyList()
         _selectedImage.value = null
     }
+
+    // -------------- Intervalometer ---------------
+
+    fun processCapturedImages(images: List<CapturedImage>) {
+        Log.d("GalleryViewModel", "Received ${images.size} interval captures")
+        _capturedImages.value = images
+        _showIntervalPopup.value = true
+    }
+
+    // Call this to dismiss the popup when user closes it
+    fun dismissIntervalPopup() {
+        _showIntervalPopup.value = false
+        _capturedImages.value = emptyList()
+    }
+
+    // Toggle selection for a given image
+    fun updateChosenImage(image: CapturedImage, selected: Boolean) {
+        val current = _chosenImages.value.toMutableSet()
+        if (selected) current.add(image) else current.remove(image)
+        _chosenImages.value = current
+    }
+
+    // Trigger downloads for selected images
+    fun downloadChosenImages() {
+        viewModelScope.launch {
+            _isDownloading.value = true
+
+            _chosenImages.value.forEach { capturedImage ->
+                val mediaInfo = capturedImageToMediaInfo(capturedImage)
+                if (mediaInfo != null) {
+                    // Construct CapturedImage first, as done in onPhotoCaptured
+                    val sessionImage = CapturedImage(
+                        uri = mediaInfo.fileName,
+                        remoteUrl = mediaInfo.fullImageUrl,
+                        lastModified = System.currentTimeMillis()
+                    )
+
+                    // Notify the session gallery
+                    mediaManager?.sessionImageListener?.onNewSessionImage(sessionImage)
+
+                    // Then trigger download
+                    mediaManager?.processBatchDownload(mediaInfo)
+                }
+            }
+
+            _chosenImages.value = emptySet()
+            _isDownloading.value = false
+            _showIntervalPopup.value = false
+        }
+    }
+
+    // Helper to build a MediaInfo object for mediaManager
+    private fun capturedImageToMediaInfo(image: CapturedImage): MediaInfo? {
+        val remoteUrl = image.remoteUrl ?: return null
+
+        // Generate a simple, valid filename
+        val fileName = generateSafeFilename()
+
+        return MediaInfo(
+            previewUrl = remoteUrl,
+            fullImageUrl = remoteUrl,
+            fileName = fileName,
+            isVideo = false
+        )
+    }
+
+    fun generateSafeFilename(): String {
+        val dateFormat = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+        val timestamp = dateFormat.format(Date())
+        val unique = System.currentTimeMillis().toString().takeLast(4)
+        val prefix = "RX10M3_"
+        val extension = ".jpg"
+        return "${prefix}_${timestamp}_$unique.$extension"
+    }
+
 }
 
 class GalleryViewModelFactory(

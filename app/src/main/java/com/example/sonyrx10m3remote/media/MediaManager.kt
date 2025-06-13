@@ -224,7 +224,7 @@ class MediaManager(
 
             // Notify listener with a new CapturedImage for session gallery
             val sessionImage = CapturedImage(
-                uri = mediaInfo.filename,
+                uri = mediaInfo.fileName,
                 remoteUrl = mediaInfo.fullImageUrl,
                 lastModified = System.currentTimeMillis()
             )
@@ -232,15 +232,33 @@ class MediaManager(
         }
 
         if (prefs.getBoolean("auto_download_jpeg", false)) {
-            val uri = mediaStoreHelper.downloadImage(mediaInfo.fullImageUrl, mediaInfo.filename)
+            val uri = mediaStoreHelper.downloadImage(mediaInfo.fullImageUrl, mediaInfo.fileName)
             if (uri != null) {
                 Log.d(
                     "MediaManager",
                     "Downloaded image, updating SessionImageRepository with URI: $uri"
                 )
-                SessionImageRepository.updateImageUri(mediaInfo.filename, uri)
+                SessionImageRepository.updateImageUri(mediaInfo.fileName, uri)
             }
         }
+    }
+
+    suspend fun processBatchDownload(mediaInfo: MediaInfo) {
+        // Only do the download & session update logic — skip live preview display
+        if (prefs.getBoolean("auto_download_jpeg", false)) {
+            val uri = mediaStoreHelper.downloadImage(mediaInfo.fullImageUrl, mediaInfo.fileName)
+            if (uri != null) {
+                Log.d(
+                    "MediaManager",
+                    "Batch downloaded image, updating SessionImageRepository with URI: $uri"
+                )
+                SessionImageRepository.updateImageUri(mediaInfo.fileName, uri)
+            }
+        }
+    }
+
+    private fun extractFileName(url: String): String {
+        return url.substringAfterLast('/')
     }
 
     // ---------------- Preview Image Decoding Helpers ----------------
@@ -328,7 +346,7 @@ class MediaManager(
     data class MediaInfo(
         val previewUrl: String,
         val fullImageUrl: String,
-        val filename: String,
+        val fileName: String,
         val isVideo: Boolean = false
     )
 }

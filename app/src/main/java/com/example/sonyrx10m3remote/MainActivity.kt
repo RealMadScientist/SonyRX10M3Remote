@@ -24,6 +24,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.ColorRes
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AlertDialog
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.platform.ComposeView
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.ColorUtils
 import androidx.lifecycle.ViewModelProvider
@@ -36,6 +39,7 @@ import com.example.sonyrx10m3remote.camera.CameraDiscovery.CameraInfo
 import com.example.sonyrx10m3remote.camera.Intervalometer
 import com.example.sonyrx10m3remote.data.CapturedImage
 import com.example.sonyrx10m3remote.media.MediaManager
+import com.example.sonyrx10m3remote.gallery.IntervalCapturedImagesPopup
 import com.example.sonyrx10m3remote.gallery.GalleryViewModel
 import com.example.sonyrx10m3remote.gallery.GalleryViewModelFactory
 import com.example.sonyrx10m3remote.gallery.SessionImageRepository
@@ -85,6 +89,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var seekBarTotalShots: SeekBar
     private lateinit var btnStartStop: MaterialButton
     private lateinit var btnGallery: MaterialButton
+    private lateinit var composeContainer: ComposeView
 
     // Network-related components
     private lateinit var connectivityManager: ConnectivityManager
@@ -179,6 +184,7 @@ class MainActivity : AppCompatActivity() {
         seekBarTotalShots = findViewById(R.id.seekBarTotalShots)
         btnStartStop = findViewById<MaterialButton>(R.id.btnStartStop)
         btnGallery = findViewById<MaterialButton>(R.id.btnGallery)
+        composeContainer = findViewById(R.id.composeContainer)
 
         val aspectRatioLayout = findViewById<com.example.sonyrx10m3remote.ui.AspectRatioFrameLayout>(R.id.rootLayout)
         aspectRatioLayout.setAspectRatio(4f / 3f) // or 3f / 2f for photo aspect ratio, depending on your source
@@ -650,7 +656,10 @@ class MainActivity : AppCompatActivity() {
             intervalometer = Intervalometer(
                 cameraController,
                 onStatusUpdate = this@MainActivity::showStatus,
-                onFinished = {
+                onFinished = { capturedImages ->
+                    // Pass the captured images list to GalleryViewModel for processing/display
+                    galleryViewModel.processCapturedImages(capturedImages)
+
                     runOnUiThread {
                         btnStartStop.text = "Start Intervalometer"
                         btnStartStop.applySmartTint()
@@ -664,7 +673,7 @@ class MainActivity : AppCompatActivity() {
                         result.success
                     }
                 },
-                performTimedCapture = { performTimedCapture(it) },
+                performTimedCapture = ::performTimedCapture,
                 getBulbDurationMs = { bulbDurationMs },
                 onError = { errorMessage ->
                     runOnUiThread {
@@ -827,6 +836,27 @@ class MainActivity : AppCompatActivity() {
                     GalleryViewModelFactory(applicationContext, mediaManager, cameraController, discoveredCameraId)
                 )
                     .get(GalleryViewModel::class.java)
+
+                // Setup embedded Compose View for intervalometer popup
+                composeContainer.setContent {
+                    val showPopup by galleryViewModel.showIntervalPopup.collectAsState()
+                    val capturedImages by galleryViewModel.capturedImages.collectAsState()
+                    val chosenImages by galleryViewModel.chosenImages.collectAsState()
+                    val isDownloading by galleryViewModel.isDownloading.collectAsState()
+
+                    if (showPopup) {
+                        IntervalCapturedImagesPopup(
+                            images = capturedImages,
+                            selectedImages = chosenImages,
+                            onDismiss = { galleryViewModel.dismissIntervalPopup() },
+                            onConfirmDownload = {
+                                galleryViewModel.downloadChosenImages()
+                            },
+                            onSelectImage = { image, selected -> galleryViewModel.updateChosenImage(image, selected) },
+                            isDownloading = isDownloading
+                        )
+                    }
+                }
 
                 // Connect mediaManager to sessionImageRepository
                 mediaManager.sessionImageListener = object : MediaManager.SessionImageListener {
@@ -1210,45 +1240,43 @@ class MainActivity : AppCompatActivity() {
     private fun buildMediaInfoFromUrls(urls: List<String>): MediaInfo? {
         if (urls.isEmpty()) return null
         val firstUrl = urls.first()
-        val filename = firstUrl
+        val fileName = firstUrl
             .substringAfterLast("/")
             .substringBefore("?")
         return MediaInfo(
             previewUrl = firstUrl,   // or a specific preview URL if you have one
             fullImageUrl = firstUrl, // assuming preview and full image are same URL here
-            filename = filename,
+            fileName = fileName,
             isVideo = false          // adjust if your URLs correspond to video
         )
     }
 
     // Helper function to perform timed captures
-    fun performTimedCapture(durationMs: Long) {
-        captureTimerJob?.cancel()
-        captureTimerJob = mainScope.launch {
-            val countdownTime = durationMs + 1000L // buffer for focus/shutter lag
-            val startTime = System.currentTimeMillis()
+    suspend fun performTimedCapture(durationMs: Long): CaptureResult {
+        val countdownTime = durationMs + 1000L
+        val startTime = System.currentTimeMillis()
 
-            val countdownJob = launch {
-                var timeLeft: Long
-                do {
-                    timeLeft = countdownTime - (System.currentTimeMillis() - startTime)
-                    if (timeLeft > 0) {
-                        btnCapture.text = "Wait (" + formatElapsedTime(timeLeft) + ")"
-                        delay(250)
-                    }
-                } while (timeLeft > 0)
-            }
+        withContext(Dispatchers.Main) {
+            var timeLeft: Long
+            do {
+                timeLeft = countdownTime - (System.currentTimeMillis() - startTime)
+                if (timeLeft > 0) {
+                    btnCapture.text = "Wait (${formatElapsedTime(timeLeft)})"
+                    delay(250)
+                }
+            } while (timeLeft > 0)
 
-            val result = cameraController.captureStill()
+            btnCapture.text = "Capturing…"
+        }
 
-            countdownJob.cancel()
-            captureTimerJob = null
+        val result = cameraController.captureStill()
+
+        withContext(Dispatchers.Main) {
             btnCapture.text = "Capture"
             btnCapture.applySmartTint()
-
-            // Call your suspend function here inside the coroutine
-            handleCaptureResult(result)
         }
+
+        return result
     }
 
     // Helper to format elapsed milliseconds as HH:MM:SS

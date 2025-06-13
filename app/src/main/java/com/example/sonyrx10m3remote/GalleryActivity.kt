@@ -3,12 +3,14 @@ package com.example.sonyrx10m3remote
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.sonyrx10m3remote.camera.CameraControllerProvider
 import com.example.sonyrx10m3remote.gallery.GalleryScreen
 import com.example.sonyrx10m3remote.gallery.GalleryViewModel
 import com.example.sonyrx10m3remote.gallery.GalleryViewModelFactory
 import com.example.sonyrx10m3remote.ui.theme.RX10M3RemoteTheme
+import kotlinx.coroutines.launch
 
 class GalleryActivity : ComponentActivity() {
 
@@ -29,7 +31,9 @@ class GalleryActivity : ComponentActivity() {
                 GalleryScreen(viewModel = viewModel,
                     cameraController = CameraControllerProvider.instance,
                     mediaManager = MediaManagerProvider.instance,
-                    cameraId = cameraId)
+                    cameraId = cameraId,
+                    onDownloadSelected = { viewModel.downloadChosenImages() }
+                )
             }
         }
     }
