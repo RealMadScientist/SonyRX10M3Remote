@@ -1,10 +1,13 @@
 package com.example.sonyrx10m3remote.gallery
 
+import android.net.Uri
+import android.util.Log
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -43,10 +46,13 @@ fun GalleryScreen(
     val cameraSdViewType by viewModel.cameraSdViewType.collectAsState()
     val cameraSdImages by viewModel.cameraSdImages.collectAsState()
     val cameraSdVideos by viewModel.cameraSdVideos.collectAsState()
+    val sessionLoading by viewModel.sessionLoading.collectAsState()
     val cameraSdLoading by viewModel.cameraSdLoading.collectAsState()
+    val downloadedLoading by viewModel.downloadedLoading.collectAsState()
     val downloadedImages by viewModel.downloadedImages.collectAsState()
     val selected by viewModel.selectedImage.collectAsState()
     val mode by viewModel.mode.collectAsState()
+    val thumbnailCache by mediaManager?.thumbnailCache?.collectAsState() ?: remember { mutableStateOf(emptyMap()) }
 
     val shownImages = when (mode) {
         GalleryMode.SESSION -> images
@@ -57,9 +63,20 @@ fun GalleryScreen(
         GalleryMode.DOWNLOADED -> downloadedImages
     }
 
-    // Switch camera mode when this screen is shown/hidden
+    val gridState = rememberLazyGridState()
+    val lastScrollIndex = remember { mutableStateOf<Int?>(null) }
+
     LaunchedEffect(Unit) {
         viewModel.onGalleryOpened()
+    }
+
+    // Switch camera mode when this screen is shown/hidden
+    LaunchedEffect(lastScrollIndex.value) {
+        val index = lastScrollIndex.value
+        if (index != null) {
+            gridState.animateScrollToItem(index)
+            lastScrollIndex.value = null // Reset after restore
+        }
     }
 
     DisposableEffect(Unit) {
@@ -73,7 +90,7 @@ fun GalleryScreen(
             Column {
                 if (mode == GalleryMode.CAMERA_SD) {
                     CameraSdTypeToggle(
-                        selectedType = viewModel.cameraSdViewType.collectAsState().value,
+                        selectedType = cameraSdViewType,
                         onSelectType = viewModel::setCameraSdViewType
                     )
                 }
@@ -96,65 +113,144 @@ fun GalleryScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            if (mode == GalleryMode.CAMERA_SD) {
-                val isImagesView = cameraSdViewType == CameraSdViewType.IMAGES
-                val items = if (isImagesView) cameraSdImages else cameraSdVideos
+            when (mode) {
+                GalleryMode.CAMERA_SD -> {
+                    val isImagesView = cameraSdViewType == CameraSdViewType.IMAGES
+                    val items = if (isImagesView) cameraSdImages else cameraSdVideos
 
-
-                when {
-                    cameraSdLoading && items.isEmpty() -> {
-                        // full-screen loading
-                        Column(
-                            modifier = Modifier.align(Alignment.Center),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            CircularProgressIndicator()
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text("Loading... this may take a while.")
-                        }
-                    }
-                    items.isNotEmpty() -> {
-                        Box {
-                            ImageGrid(images = items, onImageClick = viewModel::selectImage)
-                            if (cameraSdLoading) {
-                                // subtle top indicator
-                                LinearProgressIndicator(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(4.dp)
-                                        .align(Alignment.TopCenter)
-                                )
+                    if (selected != null) {
+                        FullscreenImagePager(
+                            images = items,
+                            startImage = selected!!,
+                            onClose = { viewModel.selectImage(null) }
+                        )
+                    } else {
+                        when {
+                            cameraSdLoading && items.isEmpty() -> {
+                                // full-screen loading
+                                Column(
+                                    modifier = Modifier.align(Alignment.Center),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    CircularProgressIndicator()
+                                    Spacer(modifier = Modifier.height(16.dp))
+                                    Text("Loading... this may take a while.")
+                                }
+                            }
+                            items.isNotEmpty() -> {
+                                Box {
+                                    ImageGrid(
+                                        images = items,
+                                        thumbnailCache = thumbnailCache,
+                                        gridState = gridState,
+                                        onImageClick = { image ->
+                                            // Save current scroll before fullscreen
+                                            lastScrollIndex.value = gridState.firstVisibleItemIndex
+                                            viewModel.selectImage(image)
+                                        }
+                                    )
+                                    if (cameraSdLoading) {
+                                        // subtle top indicator
+                                        LinearProgressIndicator(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(4.dp)
+                                                .align(Alignment.TopCenter)
+                                        )
+                                    }
+                                }
+                            }
+                            !cameraSdLoading && items.isEmpty() -> {
+                                // no items found
+                                Column(
+                                    modifier = Modifier.align(Alignment.Center),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text("No images found on camera SD.")
+                                }
                             }
                         }
                     }
-                    !cameraSdLoading && items.isEmpty() -> {
-                        // no items found
-                        Column(
-                            modifier = Modifier.align(Alignment.Center),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text("No images found on camera SD.")
+                }
+                GalleryMode.SESSION -> {
+                    when {
+                        sessionLoading -> {
+                            Column(
+                                modifier = Modifier.align(Alignment.Center),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                CircularProgressIndicator()
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text("Loading session images...")
+                            }
+                        }
+                        shownImages.isEmpty() -> {
+                            Column(
+                                modifier = Modifier.align(Alignment.Center),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text("No session images found.")
+                            }
+                        }
+                        selected == null -> {
+                            ImageGrid(images = shownImages,
+                                thumbnailCache = thumbnailCache,
+                                gridState = gridState,
+                                onImageClick = { image ->
+                                    // Save current scroll before fullscreen
+                                    lastScrollIndex.value = gridState.firstVisibleItemIndex
+                                    viewModel.selectImage(image)
+                                }
+                            )
+                        }
+                        else -> {
+                            FullscreenImagePager(
+                                images = shownImages,
+                                startImage = selected!!,
+                                onClose = { viewModel.selectImage(null) },
+                            )
                         }
                     }
                 }
-            } else {
-                if (shownImages.isEmpty()) {
-                    Column(
-                        modifier = Modifier.align(Alignment.Center),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        CircularProgressIndicator()
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text("Loading...this may take a while.")
+                GalleryMode.DOWNLOADED -> {
+                    when {
+                        downloadedLoading -> {
+                            Column(
+                                modifier = Modifier.align(Alignment.Center),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                CircularProgressIndicator()
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text("Loading downloaded images...")
+                            }
+                        }
+                        shownImages.isEmpty() -> {
+                            Column(
+                                modifier = Modifier.align(Alignment.Center),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text("No downloaded images found.")
+                            }
+                        }
+                        selected == null -> {
+                            ImageGrid(images = shownImages,
+                                thumbnailCache = thumbnailCache,
+                                gridState = gridState,
+                                onImageClick = { image ->
+                                    // Save current scroll before fullscreen
+                                    lastScrollIndex.value = gridState.firstVisibleItemIndex
+                                    viewModel.selectImage(image)
+                                }
+                            )
+                        }
+                        else -> {
+                            FullscreenImagePager(
+                                images = shownImages,
+                                startImage = selected!!,
+                                onClose = { viewModel.selectImage(null) },
+                            )
+                        }
                     }
-                } else if (selected == null) {
-                    ImageGrid(images = shownImages, onImageClick = viewModel::selectImage)
-                } else {
-                    FullscreenImagePager(
-                        images = shownImages,
-                        startImage = selected!!,
-                        onClose = { viewModel.selectImage(null) },
-                    )
                 }
             }
         }
@@ -249,14 +345,17 @@ fun GalleryBottomBar(
 @Composable
 fun ImageGrid(
     images: List<CapturedImage>,
+    thumbnailCache: Map<String, Uri>,
+    gridState: LazyGridState,
     onImageClick: (CapturedImage) -> Unit
 ) {
-    val gridState = rememberLazyGridState()
-
-    // Scroll to bottom (last item) when images list changes
+    // Auto scroll to bottom only if not restoring scroll:
     LaunchedEffect(images.size) {
         if (images.isNotEmpty()) {
-            gridState.scrollToItem(images.size - 1)
+            // Only scroll to bottom if user hasn't requested a manual restore
+            if (gridState.firstVisibleItemIndex == 0) {
+                gridState.scrollToItem(images.size - 1)
+            }
         }
     }
 
@@ -267,12 +366,14 @@ fun ImageGrid(
         state = gridState
     ) {
         items(images, key = { it.uri }) { image ->
-            val model = image.localUri ?: image.thumbnailUrl ?: image.remoteUrl
+            val model = thumbnailCache[image.uri] ?: image.localUri ?: image.thumbnailUrl ?: image.remoteUrl
             Box(
                 modifier = Modifier
                     .padding(4.dp)
                     .aspectRatio(1f)
-                    .clickable { onImageClick(image) }
+                    .clickable {
+                        onImageClick(image)
+                    }
             ) {
                 if (model != null) {
                     AsyncImage(
@@ -323,7 +424,7 @@ fun FullscreenImagePager(
             modifier = Modifier.fillMaxSize()
         ) { page ->
             val image = images[page]
-            val model = image.localUri ?: image.remoteUrl ?: image.thumbnailUrl
+            val model = image.remoteUrl ?: image.localUri ?: image.thumbnailUrl
             if (model != null) {
                 AsyncImage(
                     model = ImageRequest.Builder(LocalContext.current)

@@ -654,22 +654,31 @@ class CameraController(baseUrl: String) {
             val contentKind = itemObj.optString("contentKind")
             val uri = itemObj.optString("uri")
             val thumbnailUrl = contentObj?.optString("thumbnailUrl") ?: ""
-            var jpegUrl = ""
-            var jpegFilename = ""
 
             val createdTimeString = itemObj.optString("createdTime", "")
             val timestamp = parseIso8601ToMillis(createdTimeString)
 
+            var remoteUrl = ""
+            var fileName = ""
+
+            // Try to find jpeg URL first
             if (contentObj != null) {
                 val originalArray = contentObj.optJSONArray("original")
-                if (originalArray != null) {
+                if (originalArray != null && originalArray.length() > 0) {
+                    // Look for jpeg first
                     for (j in 0 until originalArray.length()) {
                         val fileObj = originalArray.optJSONObject(j) ?: continue
                         if (fileObj.optString("stillObject") == "jpeg") {
-                            jpegUrl = fileObj.optString("url")
-                            jpegFilename = fileObj.optString("fileName")
+                            remoteUrl = fileObj.optString("url")
+                            fileName = fileObj.optString("fileName")
                             break
                         }
+                    }
+                    // If no jpeg found, fallback to first original entry
+                    if (remoteUrl.isEmpty()) {
+                        val firstFileObj = originalArray.optJSONObject(0)
+                        remoteUrl = firstFileObj?.optString("url") ?: ""
+                        fileName = firstFileObj?.optString("fileName") ?: ""
                     }
                 }
             }
@@ -678,9 +687,9 @@ class CameraController(baseUrl: String) {
                 ContentItem(
                     uri = uri,
                     contentKind = contentKind,
-                    fileName = jpegFilename,
+                    fileName = fileName,
                     thumbnailUrl = thumbnailUrl,
-                    remoteUrl = jpegUrl,
+                    remoteUrl = remoteUrl,
                     timestamp = timestamp,
                     lastModified = System.currentTimeMillis()
                 )

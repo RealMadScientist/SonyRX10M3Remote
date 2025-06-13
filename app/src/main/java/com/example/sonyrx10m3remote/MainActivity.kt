@@ -816,12 +816,16 @@ class MainActivity : AppCompatActivity() {
                     context = this@MainActivity,
                     cameraController = cameraController,
                     imageViewLivePreview = imageView,
-                    resumeLiveViewCallback = { restartLiveView() }
+                    resumeLiveViewCallback = { restartLiveView() },
+                    cameraId = discoveredCameraId
                 )
                 MediaManagerProvider.instance = mediaManager
 
                 // Instantiate galleryViewModel
-                galleryViewModel = ViewModelProvider(this@MainActivity, GalleryViewModelFactory(applicationContext, mediaManager, cameraController, discoveredCameraId))
+                galleryViewModel = ViewModelProvider(
+                    this@MainActivity,
+                    GalleryViewModelFactory(applicationContext, mediaManager, cameraController, discoveredCameraId)
+                )
                     .get(GalleryViewModel::class.java)
 
                 // Connect mediaManager to sessionImageRepository

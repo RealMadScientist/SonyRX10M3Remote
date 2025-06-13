@@ -17,6 +17,9 @@ import com.example.sonyrx10m3remote.data.CacheManager
 import com.example.sonyrx10m3remote.data.CapturedImage
 import com.example.sonyrx10m3remote.gallery.SessionImageRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.URL
@@ -25,7 +28,8 @@ class MediaManager(
     private val context: Context,
     private val cameraController: CameraController,
     private val imageViewLivePreview: ImageView,
-    private val resumeLiveViewCallback: () -> Unit
+    private val resumeLiveViewCallback: () -> Unit,
+    private val cameraId: String?
 ) {
     private val handler = Handler(Looper.getMainLooper())
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -34,13 +38,17 @@ class MediaManager(
     private val mediaStoreHelper = MediaStoreHelper(context)
     private val cacheManager = CacheManager(context)
 
-    // Variable for live image cache
+    // Variables for live image cache (metadata)
     private val _seenUris = mutableSetOf<String>()
     private val _cachedImages = mutableListOf<ContentItem>()
     private val _cachedVideos = mutableListOf<ContentItem>()
     val seenUris: MutableSet<String> = mutableSetOf()
     val cachedImages: List<ContentItem> get() = _cachedImages
     val cachedVideos: List<ContentItem> get() = _cachedVideos
+
+    // Variables for live image cache (thumbnail)
+    private val _thumbnailCache = MutableStateFlow<Map<String, Uri>>(emptyMap())
+    val thumbnailCache: StateFlow<Map<String, Uri>> get() = _thumbnailCache
 
     // ---------------- Object Converters ----------------
 
@@ -59,29 +67,40 @@ class MediaManager(
 
     // Used for converting ContentItem to CapturedImage for internal app usage
     fun contentToCaptured(item: ContentItem): CapturedImage {
+        val localThumbUri = if (cameraId != null && item.thumbnailUrl != null) {
+            val file = cacheManager.getThumbnailFile(cameraId, item.uri)
+            if (file.exists() && file.length() > 0) Uri.fromFile(file) else null
+        } else null
+
         return CapturedImage(
             uri = item.uri,
             remoteUrl = item.remoteUrl,
             thumbnailUrl = item.thumbnailUrl,
             fileName = item.fileName,
             timestamp = item.timestamp,
+            downloaded = false,
             contentKind = item.contentKind,
-            lastModified = item.lastModified
+            lastModified = item.lastModified,
+            localUri = localThumbUri
         )
     }
 
     // ---------------- Live Image Cache ----------------
 
     fun addToCache(images: List<ContentItem>, videos: List<ContentItem>) {
-        // Filter out images with duplicate URIs
-        val existingImageUris = _cachedImages.map { it.uri }.toSet()
-        val newUniqueImages = images.filter { it.uri !in existingImageUris }
-        _cachedImages.addAll(newUniqueImages)
+        val imageMap = _cachedImages.associateBy { it.uri }.toMutableMap()
+        for (item in images) {
+            imageMap[item.uri] = item // Overwrites existing entries with updated ones
+        }
+        _cachedImages.clear()
+        _cachedImages.addAll(imageMap.values)
 
-        // Similarly for videos
-        val existingVideoUris = _cachedVideos.map { it.uri }.toSet()
-        val newUniqueVideos = videos.filter { it.uri !in existingVideoUris }
-        _cachedVideos.addAll(newUniqueVideos)
+        val videoMap = _cachedVideos.associateBy { it.uri }.toMutableMap()
+        for (item in videos) {
+            videoMap[item.uri] = item
+        }
+        _cachedVideos.clear()
+        _cachedVideos.addAll(videoMap.values)
     }
 
     fun clearCache() {
@@ -90,7 +109,47 @@ class MediaManager(
         _cachedVideos.clear()
     }
 
+    /**
+     * Downloads missing thumbnails for the given images and updates the thumbnail cache.
+     * Calls [onDownloaded] with each updated CapturedImage if provided.
+     */
+    suspend fun downloadMissingThumbnails(
+        cameraId: String?,
+        images: List<CapturedImage>,
+        onDownloaded: (CapturedImage) -> Unit
+    ) {
+        if (cameraId == null) return
+
+        for (image in images) {
+            // Skip if localUri exists or thumbnailUrl missing or already cached
+            if (image.localUri != null || image.thumbnailUrl == null || isThumbnailCached(image.uri)) continue
+
+            val localUri = cacheManager.downloadAndSaveThumbnail(
+                cameraId = cameraId,
+                imageUri = image.uri,
+                thumbnailUrl = image.thumbnailUrl
+            )
+
+            if (localUri != null) {
+                // Update internal cache map
+                _thumbnailCache.update { currentMap ->
+                    currentMap + (image.uri to localUri)
+                }
+
+                val updated = image.copy(localUri = localUri)
+
+                withContext(Dispatchers.Main) {
+                    onDownloaded(updated)
+                }
+            }
+        }
+    }
+
     // ---------------- Disk Cache ----------------
+
+    fun isThumbnailCached(uri: String): Boolean {
+        return _thumbnailCache.value.containsKey(uri)
+    }
 
     /**
      * Load from disk cache into live cache.
@@ -98,25 +157,33 @@ class MediaManager(
      * Must be called from a coroutine/suspend context.
      */
     suspend fun loadDiskCacheIntoLive(cameraId: String) {
-        // Load list of CapturedImage from disk via CacheManager
         val cachedCapturedItems = cacheManager.loadCachedMetadata(cameraId)
         Log.d(TAG, "Loaded ${cachedCapturedItems.size} items from disk cache for camera $cameraId")
 
-        // Clear current live cache
         clearCache()
 
-        // Populate live cache
+        // Build thumbnail cache map
+        val thumbnailMap = mutableMapOf<String, Uri>()
+
         cachedCapturedItems
             .distinctBy { it.uri }
             .forEach { captured ->
                 val item = capturedToContentItem(captured)
+
+                // Insert into thumbnail map if local URI exists
+                captured.localUri?.let { thumbnailMap[captured.uri] = it }
+
                 when (item.contentKind?.lowercase()) {
                     "still", "image" -> _cachedImages.add(item)
                     "video", "movie" -> _cachedVideos.add(item)
                     else -> _cachedImages.add(item)
                 }
+
                 _seenUris.add(item.uri)
             }
+
+        // Push map to StateFlow
+        _thumbnailCache.value = thumbnailMap
     }
 
     /**

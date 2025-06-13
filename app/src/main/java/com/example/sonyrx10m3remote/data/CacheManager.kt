@@ -5,6 +5,7 @@ import android.net.Uri
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -21,12 +22,24 @@ class CacheManager(private val context: Context) {
         private const val METADATA_FILE = "metadata.json"
     }
 
-    fun getCameraCacheDir(cameraId: String): File {
-        val dir = File(context.getExternalFilesDir(null), "DCIM/SonyRX10M3Remote/cache/$cameraId")
-        Log.d("CacheManager", "Camera cache dir path = ${dir.absolutePath}")
+    private fun getCameraCacheDir(cameraId: String): File {
+        val dir = File(context.getExternalFilesDir(null), "cache/$cameraId")
+//        Log.d("CacheManager", "Camera cache dir path = ${dir.absolutePath}")
         if (!dir.exists()) dir.mkdirs().also {
             Log.d("CacheManager", "mkdirs() returned $it for ${dir.absolutePath}")
         }
+        return dir
+    }
+
+    private fun getMetadataDir(cameraId: String): File {
+        val dir = File(getCameraCacheDir(cameraId), "metadata")
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
+    private fun getThumbnailDir(cameraId: String): File {
+        val dir = File(getCameraCacheDir(cameraId), "thumbnails")
+        if (!dir.exists()) dir.mkdirs()
         return dir
     }
 
@@ -36,8 +49,7 @@ class CacheManager(private val context: Context) {
         cameraId: String,
         capturedImages: List<CapturedImage>
     ) = withContext(Dispatchers.IO) {
-        val dir = getCameraCacheDir(cameraId)
-        val metadataFile = File(dir, METADATA_FILE)
+        val metadataFile = File(getMetadataDir(cameraId), METADATA_FILE)
 
         try {
             val jsonArray = JSONArray()
@@ -66,7 +78,7 @@ class CacheManager(private val context: Context) {
 
     suspend fun loadCachedMetadata(cameraId: String): List<CapturedImage> = withContext(Dispatchers.IO) {
         val dir = getCameraCacheDir(cameraId)
-        val metadataFile = File(dir, METADATA_FILE)
+        val metadataFile = File(getMetadataDir(cameraId), METADATA_FILE)
 
         if (!metadataFile.exists()) {
             Log.w(TAG, "No cached metadata found at ${metadataFile.path}")
@@ -106,9 +118,11 @@ class CacheManager(private val context: Context) {
     // ---------------- Cached Thumbnails ----------------
 
     fun getThumbnailFile(cameraId: String, imageUri: String): File {
-        // sanitize imageUri into a safe name
-        val safeName = imageUri.hashCode().toString()
-        val dir = getCameraCacheDir(cameraId)
+        // sanitize imageUri into a safe name via SHA-256
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val hashBytes = digest.digest(imageUri.toByteArray(Charsets.UTF_8))
+        val safeName = hashBytes.joinToString("") { "%02x".format(it) }
+        val dir = getThumbnailDir(cameraId)
         return File(dir, "thumb_$safeName.jpg")
     }
 
@@ -119,32 +133,33 @@ class CacheManager(private val context: Context) {
     ): Uri? = withContext(Dispatchers.IO) {
         try {
             val file = getThumbnailFile(cameraId, imageUri)
-            // If already exists and non-zero length, skip download
             if (file.exists() && file.length() > 0) {
                 return@withContext Uri.fromFile(file)
             }
-            // Download via OkHttp
-            val client = OkHttpClient()
-            val request = Request.Builder().url(thumbnailUrl).build()
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "Thumbnail download failed: $thumbnailUrl, code=${response.code}")
-                    return@withContext null
-                }
-                val body = response.body
-                if (body != null) {
-                    // Ensure parent dirs exist
-                    file.parentFile?.let { parent ->
-                        if (!parent.exists()) parent.mkdirs()
+
+            var resultUri: Uri? = null
+
+            withTimeout(5000L) {
+                val client = OkHttpClient()
+                val request = Request.Builder().url(thumbnailUrl).build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        Log.e(TAG, "Thumbnail download failed: $thumbnailUrl, code=${response.code}")
+                        return@use
                     }
-                    // Write bytes
-                    file.outputStream().use { os ->
-                        os.write(body.bytes())
+
+                    response.body?.let { body ->
+                        file.parentFile?.mkdirs()
+                        file.outputStream().use { os ->
+                            os.write(body.bytes())
+                        }
+                        resultUri = Uri.fromFile(file)
                     }
-                    return@withContext Uri.fromFile(file)
                 }
             }
-            return@withContext null
+
+            return@withContext resultUri
+
         } catch (e: Exception) {
             Log.e(TAG, "Error downloading thumbnail: ${e.localizedMessage}")
             return@withContext null

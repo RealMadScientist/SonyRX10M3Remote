@@ -49,8 +49,12 @@ class GalleryViewModel(
     private val _cameraSdViewType = MutableStateFlow(CameraSdViewType.IMAGES)
     val cameraSdViewType: StateFlow<CameraSdViewType> = _cameraSdViewType
 
+    private val _sessionLoading = MutableStateFlow(true)
+    val sessionLoading: StateFlow<Boolean> = _sessionLoading
     private val _cameraSdLoading = MutableStateFlow(false)
     val cameraSdLoading: StateFlow<Boolean> = _cameraSdLoading
+    private val _downloadedLoading = MutableStateFlow(true)
+    val downloadedLoading: StateFlow<Boolean> = _downloadedLoading
 
     private val _downloadedImages = MutableStateFlow<List<CapturedImage>>(emptyList())
     val downloadedImages: StateFlow<List<CapturedImage>> = _downloadedImages
@@ -62,12 +66,14 @@ class GalleryViewModel(
     val mode: StateFlow<GalleryMode> = _mode
 
     init {
+        _sessionLoading.value = true
         viewModelScope.launch {
             SessionImageRepository.sessionImages.collect { sessionList ->
                 Log.d("GalleryViewModel", "Session images updated: ${sessionList.size} images")
                 _sessionImages.value = sessionList
             }
         }
+        _sessionLoading.value = false
     }
 
     fun onGalleryOpened() {
@@ -137,6 +143,7 @@ class GalleryViewModel(
     }
 
     fun selectImage(image: CapturedImage?) {
+        Log.d("GalleryViewModel", "selectImage called with $image")
         _selectedImage.value = image
     }
 
@@ -198,6 +205,17 @@ class GalleryViewModel(
                     Log.w("GalleryViewModel", "cameraId is null/blank; skipping disk cache save")
                 }
 
+
+                // Now download missing thumbnails for camera SD images, update state as they arrive
+                launch {
+                    mediaManager.downloadMissingThumbnails(cameraId, _cameraSdImages.value) { updatedImage ->
+                        // Update the list by replacing the image with updated localUri
+                        val updatedList = _cameraSdImages.value.map {
+                            if (it.uri == updatedImage.uri) updatedImage else it
+                        }
+                        _cameraSdImages.value = updatedList
+                    }
+                }
             } catch (e: Exception) {
                 Log.e("GalleryViewModel", "Failed to load Camera SD media: ${e.localizedMessage}")
                 _cameraSdImages.value = emptyList()
@@ -236,7 +254,7 @@ class GalleryViewModel(
 
         while (true) {
             val contents = cameraController.getContentList(uri = uri, stIdx = startIndex, cnt = pageSize)
-//            Log.d("GalleryViewModel", "getContentList($uri, $startIndex, $pageSize) returned ${contents.size} items")
+//            Log.d("GalleryViewModel", "getContentList($uri, $startIndex) returned ${contents.size} items")
 
             if (contents.isEmpty()) {
 //                Log.d("GalleryViewModel", "No more contents at $uri, breaking loop")
@@ -262,13 +280,13 @@ class GalleryViewModel(
                 lastDir = dirs.last()
             }
 
-            Log.d("GalleryViewModel", "Found newStills=${newStills.size}, newVideos=${newVideos.size}, directories=${dirs.size}")
+//            Log.d("GalleryViewModel", "Found newStills=${newStills.size}, newVideos=${newVideos.size}, directories=${dirs.size}")
 
             images.addAll(newStills)
             videos.addAll(newVideos)
 
             if (alreadyVisited) {
-                Log.d("GalleryViewModel", "Revisited $uri and found ${newStills.size} new stills, ${newVideos.size} new videos")
+//                Log.d("GalleryViewModel", "Revisited $uri and found ${newStills.size} new stills, ${newVideos.size} new videos")
             }
 
             directories.addAll(dirs)
@@ -300,6 +318,7 @@ class GalleryViewModel(
     }
 
     private fun loadDownloadedImages(folderRelativePath: String = "DCIM/SonyRX10M3Remote/") {
+        _downloadedLoading.value = true
         viewModelScope.launch {
             val uris = mediaStoreHelper.loadDownloadedImages(folderRelativePath)
             Log.d("GalleryViewModel", "Loaded ${uris.size} downloaded images")
@@ -310,6 +329,7 @@ class GalleryViewModel(
                 )
             }
         }
+        _downloadedLoading.value = false
     }
 
     fun clear() {
