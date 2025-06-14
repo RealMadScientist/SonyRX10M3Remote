@@ -23,7 +23,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import java.util.concurrent.TimeoutException
 
 enum class GalleryMode {
     SESSION,
@@ -159,6 +161,11 @@ class GalleryViewModel(
 
             } catch (e: Exception) {
                 Log.e("GalleryViewModel", "Error starting live view: ${e.localizedMessage}")
+            }
+
+            val success = cameraController.ensureContShootingModeSingle()
+            if (!success) {
+                Log.w("GalleryViewModel", "Failed to ensure continuous shooting mode is Single")
             }
         }
     }
@@ -377,8 +384,15 @@ class GalleryViewModel(
 
     // Call this to dismiss the popup when user closes it
     fun dismissIntervalPopup() {
-        _showIntervalPopup.value = false
-        _capturedImages.value = emptyList()
+        viewModelScope.launch {
+            // Hide popup and clear selected images
+            _isDownloading.value = false
+            _showIntervalPopup.value = false
+            _capturedImages.value = emptyList()
+            _chosenImages.value = emptySet()
+
+            onGalleryClosed()
+        }
     }
 
     // Toggle selection for a given image
@@ -411,9 +425,7 @@ class GalleryViewModel(
                 }
             }
 
-            _chosenImages.value = emptySet()
-            _isDownloading.value = false
-            _showIntervalPopup.value = false
+            dismissIntervalPopup()
         }
     }
 

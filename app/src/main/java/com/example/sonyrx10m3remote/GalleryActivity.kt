@@ -9,6 +9,7 @@ import com.example.sonyrx10m3remote.camera.CameraControllerProvider
 import com.example.sonyrx10m3remote.gallery.GalleryScreen
 import com.example.sonyrx10m3remote.gallery.GalleryViewModel
 import com.example.sonyrx10m3remote.gallery.GalleryViewModelFactory
+import com.example.sonyrx10m3remote.media.MediaManagerProvider
 import com.example.sonyrx10m3remote.ui.theme.RX10M3RemoteTheme
 import kotlinx.coroutines.launch
 

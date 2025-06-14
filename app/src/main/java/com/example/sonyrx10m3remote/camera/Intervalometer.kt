@@ -27,7 +27,7 @@ class Intervalometer(
     private val onFinished: (List<CapturedImage>) -> Unit,
     private val getShutterSpeed: () -> String,
     private val startBulb: suspend () -> Boolean,
-    private val stopBulb: suspend () -> Boolean,
+    private val stopBulb: suspend () -> CaptureResult,
     private val performTimedCapture: suspend (Long) -> CaptureResult,
     private val getBulbDurationMs: () -> Long,
     private val onError: (String) -> Unit,
@@ -41,6 +41,10 @@ class Intervalometer(
 
     // Flag indicating if intervalometer is currently running
     private var isRunning = false
+
+    // Trackers for continuous shooting captures
+    private var shotsTaken = 0
+    private var isBurstMode = false
 
     /**
      * Converts a slider value to interval duration in milliseconds.
@@ -107,10 +111,7 @@ class Intervalometer(
                     runIntervalMode(intervalMs, totalShots)
                 }
             } finally {
-                withContext(Dispatchers.Main) {
-                    onFinished(capturedImages.toList())
-                    Log.d("Intervalometer", "Job complete with ${capturedImages.size} images")
-                }
+                Log.d("Intervalometer", "Job complete with ${capturedImages.size} images")
             }
         }
     }
@@ -125,30 +126,32 @@ class Intervalometer(
             return
         }
 
-        // Run stop operations on a background coroutine
         CoroutineScope(Dispatchers.Default).launch {
-            val stopped = cameraController.stopContinuousShooting()
-            if (!stopped) {
-                onStatusUpdate("Failed to stop continuous shooting")
+            if (isBurstMode) {
+                val stopped = cameraController.stopContinuousShooting()
+                if (!stopped) {
+                    onStatusUpdate("Failed to stop continuous shooting")
+                } else {
+                    onStatusUpdate("Continuous shooting stopped")
+                }
+
+                onStatusUpdate("Waiting for camera to become idle...")
+                try {
+                    cameraController.waitForIdleStatus(timeoutMillis = 30_000)
+                } catch (e: TimeoutException) {
+                    onStatusUpdate("Warning: camera did not become idle within timeout")
+                }
+
+                accumulateBurstImages()
+
+                // Reset flag
+                isBurstMode = false
             } else {
-                onStatusUpdate("Continuous shooting stopped")
-            }
-
-            onStatusUpdate("Waiting for camera to become idle...")
-            try {
-                cameraController.waitForIdleStatus(timeoutMillis = 30_000)
-            } catch (e: TimeoutException) {
-                onStatusUpdate("Warning: camera did not become idle within timeout")
-            }
-
-            // Reset continuous shooting mode to 'Single'
-            if (!cameraController.setContShootingMode("Single")) {
-                onStatusUpdate("Warning: Failed to reset continuous shooting mode to 'Single'")
-            }
-
-            // Reset shoot mode to 'still'
-            if (!cameraController.setShootMode("still")) {
-                onStatusUpdate("Warning: Failed to set shoot mode to 'still'")
+                // Normal stop logic for non-burst mode, if needed
+                // If you have other cleanup here, put it here. Otherwise just reset shoot mode:
+                if (!cameraController.setShootMode("still")) {
+                    onStatusUpdate("Warning: Failed to set shoot mode to 'still'")
+                }
             }
 
             withContext(Dispatchers.Main) {
@@ -256,9 +259,9 @@ class Intervalometer(
             return
         }
 
-        onStatusUpdate("Continuous shooting started")
+        isBurstMode = true
 
-        var shotsTaken = 0
+        onStatusUpdate("Continuous shooting started")
 
         // Loop while coroutine is active
         while (isActive) {
@@ -344,6 +347,7 @@ class Intervalometer(
     private fun accumulateCaptureResult(result: CameraController.CaptureResult) {
         if (result.success && result.imageUrls.isNotEmpty()) {
             result.imageUrls.forEach { url ->
+                Log.d(TAG, "accumulateCaptureResult: Adding CapturedImage with uri='$url', remoteUrl='$url'")
                 capturedImages.add(
                     CapturedImage(
                         uri = url,
@@ -355,6 +359,45 @@ class Intervalometer(
         } else {
             onError("Capture failed during interval sequence")
         }
+    }
+
+    /**
+     * Modified to collect all images taken during a continuous shoot
+     */
+    private suspend fun accumulateBurstImages() {
+        if (shotsTaken <= 0) {
+            onStatusUpdate("No shots to fetch")
+            return
+        }
+
+        val switchedToContents = cameraController.setCameraFunction("Contents Transfer")
+        if (!switchedToContents) {
+            onStatusUpdate("Failed to switch to Contents Transfer mode")
+            return
+        }
+
+        val burstImages = cameraController.getLatestImagesByShotCount(shotsTaken)
+
+        if (burstImages.isEmpty()) {
+            onError("No images found after burst capture")
+        } else {
+            onStatusUpdate("Fetched ${burstImages.size} burst images")
+            burstImages.forEach { item ->
+                capturedImages.add(
+                    CapturedImage(
+                        uri = item.remoteUrl,
+                        remoteUrl = item.remoteUrl,
+                        thumbnailUrl = item.thumbnailUrl,
+                        lastModified = System.currentTimeMillis()
+                    )
+                )
+            }
+        }
+
+//        val switchedBack = cameraController.setCameraFunction("Remote Shooting")
+//        if (!switchedBack) {
+//            onStatusUpdate("Warning: Failed to switch back to Remote Shooting mode")
+//        }
     }
 
     /**
@@ -385,10 +428,8 @@ class Intervalometer(
 
             delay(bulbDuration)
 
-            val stopped = stopBulb()
-            if (!stopped) {
-                onStatusUpdate("Failed to stop bulb exposure cleanly")
-            }
+            val result = stopBulb()
+            accumulateCaptureResult(result)
 
         } else {
             val shutterDurationMs = cameraController.currentShutterDurationMs ?: 0L

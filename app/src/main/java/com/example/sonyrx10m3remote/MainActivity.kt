@@ -39,11 +39,12 @@ import com.example.sonyrx10m3remote.camera.CameraDiscovery.CameraInfo
 import com.example.sonyrx10m3remote.camera.Intervalometer
 import com.example.sonyrx10m3remote.data.CapturedImage
 import com.example.sonyrx10m3remote.media.MediaManager
+import com.example.sonyrx10m3remote.media.MediaManagerProvider
+import com.example.sonyrx10m3remote.media.MediaManager.MediaInfo
 import com.example.sonyrx10m3remote.gallery.IntervalCapturedImagesPopup
 import com.example.sonyrx10m3remote.gallery.GalleryViewModel
 import com.example.sonyrx10m3remote.gallery.GalleryViewModelFactory
 import com.example.sonyrx10m3remote.gallery.SessionImageRepository
-import com.example.sonyrx10m3remote.media.MediaManager.MediaInfo
 import com.google.android.material.button.MaterialButton
 import com.google.zxing.integration.android.IntentIntegrator
 import kotlinx.coroutines.*
@@ -666,13 +667,8 @@ class MainActivity : AppCompatActivity() {
                     }
                 },
                 getShutterSpeed = { if (isBulbMode) "BULB" else "OTHER" },
-                startBulb = { runBlocking { startBulbExposure() } }, // assuming startBulbExposure returns Boolean
-                stopBulb = {
-                    runBlocking {
-                        val result = stopBulbExposure()
-                        result.success
-                    }
-                },
+                startBulb = { startBulbExposure() },
+                stopBulb = { stopBulbExposure() },
                 performTimedCapture = ::performTimedCapture,
                 getBulbDurationMs = { bulbDurationMs },
                 onError = { errorMessage ->

@@ -293,6 +293,26 @@ class CameraController(baseUrl: String) {
         }
     }
 
+    // Requests the current continuous shooting mode.
+    suspend fun getContShootingMode(): String? {
+        val resp = callMethod(cameraUrl, "getContShootingMode")
+        if (resp == null) {
+            Log.e(TAG, "getContShootingMode: null response")
+            return null
+        }
+        return try {
+            val resultArray = resp.optJSONArray("result")
+            if (resultArray != null && resultArray.length() > 0) {
+                resultArray.optString(0)
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "getContShootingMode JSON parse error: ${e.localizedMessage}")
+            null
+        }
+    }
+
     // Sets shooting mode.
     suspend fun setShootMode(mode: String): Boolean {
         val resp = callMethod(cameraUrl, "setShootMode", listOf(mode))
@@ -310,6 +330,32 @@ class CameraController(baseUrl: String) {
         val success: Boolean,
         val imageUrls: List<String> = emptyList()
     )
+
+    // Makes sure the current ContShootingMode is single
+    suspend fun ensureContShootingModeSingle(
+        timeoutMillis: Long = 10_000,
+        retryIntervalMillis: Long = 500
+    ): Boolean {
+        val currentMode = getContShootingMode()
+        if (currentMode == "Single") {
+            Log.d("CameraController", "Continuous shooting mode already 'Single'")
+            return true
+        }
+
+        val startTime = System.currentTimeMillis()
+        while (System.currentTimeMillis() - startTime < timeoutMillis) {
+            val success = setContShootingMode("Single")
+            if (success) {
+                Log.d("CameraController", "Successfully set continuous shooting mode to 'Single'")
+                return true
+            } else {
+                Log.d("CameraController", "Retrying setContShootingMode('Single')...")
+                delay(retryIntervalMillis)
+            }
+        }
+        Log.w("CameraController", "⚠ Timed out trying to set continuous shooting mode to 'Single'")
+        return false
+    }
 
     /**
      * Takes a picture in still mode.
@@ -612,7 +658,8 @@ class CameraController(baseUrl: String) {
     suspend fun getContentList(
         uri: String = "storage:memoryCard1",
         stIdx: Int = 0,
-        cnt: Int = 100
+        cnt: Int = 100,
+        sort: String = ""
     ): List<ContentItem> {
         return try {
             val response = callMethod(
@@ -622,7 +669,8 @@ class CameraController(baseUrl: String) {
                         "uri" to uri,
                         "stIdx" to stIdx,
                         "cnt" to cnt,
-                        "view" to "date"
+                        "view" to "date",
+                        "sort" to sort
                     )
                 ),
                 url = avContentUrl,
@@ -714,80 +762,37 @@ class CameraController(baseUrl: String) {
         }
     }
 
-    // Gets the number of items in a folder
-    suspend fun getContentCount(uri: String = "/"): JSONObject? {
-        return try {
-            callMethod(
-                url = avContentUrl,
-                method = "getContentCount",
-                params = listOf(uri)
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in getContentCount: ${e.localizedMessage}")
-            null
-        }
-    }
+    // Helper function to collect images taken during a continuous shoot
+    suspend fun getLatestImagesByShotCount(
+        shotsTaken: Int,
+        maxBatchSize: Int = 100
+    ): List<ContentItem> {
+        if (shotsTaken <= 0) return emptyList()
 
-    // Fetches the thumbnail image metadata for a file URI
-    suspend fun getThumbnail(uri: String): JSONObject? {
-        return try {
-            callMethod(
-                url = avContentUrl,
-                method = "getThumb",
-                params = listOf(uri)
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in getThumbnail: ${e.localizedMessage}")
-            null
-        }
-    }
+        val collectedItems = mutableListOf<ContentItem>()
 
-    // Retrieves metadata/info for a specific file
-    suspend fun getContentInfo(uri: String): JSONObject? {
-        return try {
-            callMethod(
-                url = avContentUrl,
-                method = "getContentInfo",
-                params = listOf(uri)
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in getContentInfo: ${e.localizedMessage}")
-            null
-        }
-    }
+        // Step 1: Get top-level folders (dates)
+        val rootItems = getContentList(uri = "storage:memoryCard1", stIdx = 0, cnt = maxBatchSize, sort = "descending")
 
-    // Deletes a file or folder by URI
-    suspend fun deleteContent(uri: String): JSONObject? {
-        return try {
-            callMethod(
-                url = avContentUrl,
-                method = "deleteContent",
-                params = listOf(uri)
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in deleteContent: ${e.localizedMessage}")
-            null
-        }
-    }
-
-    // Downloads a file directly from a given HTTP file URL
-    suspend fun downloadContent(fileUrl: String): ByteArray? = withContext(Dispatchers.IO) {
-        try {
-            val request = Request.Builder()
-                .url(fileUrl)
-                .build()
-
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "Failed to download content from $fileUrl, HTTP code: ${response.code}")
-                    return@withContext null
+        // Step 2: For each folder item, fetch its content items
+        for (folder in rootItems) {
+            // Identify folder items by checking for '?path=' in uri
+            if (folder.uri.contains("?path=")) {
+                val folderContents = getContentList(uri = folder.uri, stIdx = 0, cnt = maxBatchSize, sort = "descending")
+                // Filter out items without remoteUrl (likely folders or invalid)
+                val imageFiles = folderContents.filter { it.remoteUrl.isNotEmpty() }
+                collectedItems.addAll(imageFiles)
+            } else {
+                // Sometimes images might be at root level, so add if has URL
+                if (folder.remoteUrl.isNotEmpty()) {
+                    collectedItems.add(folder)
                 }
-                return@withContext response.body?.bytes()
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Download error for $fileUrl: ${e.localizedMessage}")
-            null
+            if (collectedItems.size >= shotsTaken) break
         }
+
+        // Sort all collected images by timestamp ascending (oldest to newest)
+        return collectedItems.sortedBy { it.timestamp }.take(shotsTaken)
     }
 
     // Disconnect and clean up resources.
