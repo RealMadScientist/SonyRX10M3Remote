@@ -6,11 +6,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyGridState
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.*
+import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,6 +23,8 @@ import androidx.compose.ui.*
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -34,6 +33,11 @@ import coil.request.ImageRequest
 import com.example.sonyrx10m3remote.camera.CameraController
 import com.example.sonyrx10m3remote.data.CapturedImage
 import com.example.sonyrx10m3remote.media.MediaManager
+import com.example.sonyrx10m3remote.R
+import java.text.SimpleDateFormat
+import java.util.*
+
+data class ScrollPosition(val index: Int = 0, val offset: Int = 0)
 
 @Composable
 fun GalleryScreen(
@@ -64,6 +68,12 @@ fun GalleryScreen(
     val isDownloading by viewModel.isDownloading.collectAsState()
     val isInSelectionMode by viewModel.isInSelectionMode.collectAsState()
 
+    var groupingMode by mutableStateOf(GroupingMode.FLAT)
+    var ungroupedScrollPosition by remember { mutableStateOf(ScrollPosition()) }
+    var groupedScrollPosition by remember { mutableStateOf(ScrollPosition()) }
+    val ungroupedGridState = rememberLazyGridState()
+    val groupedListState = rememberLazyListState()
+
     val shownImages = when (mode) {
         GalleryMode.SESSION -> images
         GalleryMode.CAMERA_SD -> when (cameraSdViewType) {
@@ -87,6 +97,23 @@ fun GalleryScreen(
             gridState.animateScrollToItem(index)
             lastScrollIndex.value = null // Reset after restore
         }
+    }
+
+    LaunchedEffect(groupingMode) {
+        if (groupingMode == GroupingMode.FLAT) {
+            ungroupedGridState.scrollToItem(ungroupedScrollPosition.index, ungroupedScrollPosition.offset)
+        } else if (groupingMode == GroupingMode.BY_DATE) {
+            groupedListState.scrollToItem(groupedScrollPosition.index, groupedScrollPosition.offset)
+        }
+    }
+
+
+    LaunchedEffect(ungroupedGridState.firstVisibleItemIndex, ungroupedGridState.firstVisibleItemScrollOffset) {
+        ungroupedScrollPosition = ScrollPosition(ungroupedGridState.firstVisibleItemIndex, ungroupedGridState.firstVisibleItemScrollOffset)
+    }
+
+    LaunchedEffect(groupedListState.firstVisibleItemIndex, groupedListState.firstVisibleItemScrollOffset) {
+        groupedScrollPosition = ScrollPosition(groupedListState.firstVisibleItemIndex, groupedListState.firstVisibleItemScrollOffset)
     }
 
     DisposableEffect(Unit) {
@@ -163,11 +190,7 @@ fun GalleryScreen(
                     } else {
                         when {
                             cameraSdLoading && items.isEmpty() -> {
-                                // full-screen loading
-                                Column(
-                                    modifier = Modifier.align(Alignment.Center),
-                                    horizontalAlignment = Alignment.CenterHorizontally
-                                ) {
+                                Column(modifier = Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                                     CircularProgressIndicator()
                                     Spacer(modifier = Modifier.height(16.dp))
                                     Text("Loading... this may take a while.")
@@ -175,32 +198,56 @@ fun GalleryScreen(
                             }
                             items.isNotEmpty() -> {
                                 Box {
-                                    ImageGrid(
-                                        images = items,
-                                        thumbnailCache = thumbnailCache,
-                                        gridState = gridState,
-                                        onImageClick = { image ->
-                                            if (!isInSelectionMode) {
-                                                lastScrollIndex.value = gridState.firstVisibleItemIndex
-                                                viewModel.selectImage(image)
-                                            }
-                                        },
-                                        onSelectImage = { image, selected ->
-                                            if (isInSelectionMode) {
-                                                viewModel.updateChosenImage(image, selected)
-                                            }
-                                        },
-                                        onLongClick = { image ->
-                                            if (!isInSelectionMode) {
-                                                viewModel.enterSelectionMode()
-                                            }
-                                        },
-                                        selectedImages = chosenImages,
-                                        selectionEnabled = isInSelectionMode,
-                                        isDownloading = isDownloading
-                                    )
+                                    when (groupingMode) {
+                                        GroupingMode.FLAT -> {
+                                            ImageGrid(
+                                                images = items,
+                                                thumbnailCache = thumbnailCache,
+                                                gridState = ungroupedGridState,
+                                                onImageClick = { image ->
+                                                    if (!isInSelectionMode) {
+                                                        viewModel.selectImage(image)
+                                                    }
+                                                },
+                                                onLongClick = {
+                                                    if (!isInSelectionMode) viewModel.enterSelectionMode()
+                                                },
+                                                selectedImages = chosenImages,
+                                                isDownloading = isDownloading,
+                                                selectionEnabled = isInSelectionMode,
+                                                onSelectImage = { image, selected ->
+                                                    viewModel.updateChosenImage(image, selected)
+                                                },
+                                                requestThumbnail = { viewModel.requestThumbnailIfNeeded(it) },
+                                                onPrefetchNearby = { viewModel.prefetchThumbnailsIfNeeded(it) }
+                                            )
+                                        }
+                                        GroupingMode.BY_DATE -> {
+                                            GroupedImageGrid(
+                                                images = items,
+                                                thumbnailCache = thumbnailCache,
+                                                listState = groupedListState,
+                                                onImageClick = { image ->
+                                                    if (!isInSelectionMode) {
+                                                        viewModel.selectImage(image)
+                                                    }
+                                                },
+                                                onLongClick = {
+                                                    if (!isInSelectionMode) viewModel.enterSelectionMode()
+                                                },
+                                                selectedImages = chosenImages,
+                                                isDownloading = isDownloading,
+                                                selectionEnabled = isInSelectionMode,
+                                                onSelectImage = { image, selected ->
+                                                    viewModel.updateChosenImage(image, selected)
+                                                },
+                                                requestThumbnail = { viewModel.requestThumbnailIfNeeded(it) },
+                                                onPrefetchNearby = { viewModel.prefetchThumbnailsIfNeeded(it) }
+                                            )
+                                        }
+                                    }
+
                                     if (cameraSdLoading) {
-                                        // subtle top indicator
                                         LinearProgressIndicator(
                                             modifier = Modifier
                                                 .fillMaxWidth()
@@ -211,11 +258,7 @@ fun GalleryScreen(
                                 }
                             }
                             !cameraSdLoading && items.isEmpty() -> {
-                                // no items found
-                                Column(
-                                    modifier = Modifier.align(Alignment.Center),
-                                    horizontalAlignment = Alignment.CenterHorizontally
-                                ) {
+                                Column(modifier = Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                                     Text("No images found on camera SD.")
                                 }
                             }
@@ -283,12 +326,11 @@ fun GalleryScreen(
                             }
                         }
                         selected == null -> {
-                            ImageGrid(images = shownImages,
+                            ImageGrid(
+                                images = shownImages,
                                 thumbnailCache = thumbnailCache,
-                                gridState = gridState,
+                                gridState = ungroupedGridState,
                                 onImageClick = { image ->
-                                    // Save current scroll before fullscreen
-                                    lastScrollIndex.value = gridState.firstVisibleItemIndex
                                     viewModel.selectImage(image)
                                 }
                             )
@@ -297,7 +339,7 @@ fun GalleryScreen(
                             FullscreenImagePager(
                                 images = shownImages,
                                 startImage = selected!!,
-                                onClose = { viewModel.selectImage(null) },
+                                onClose = { viewModel.selectImage(null) }
                             )
                         }
                     }
@@ -440,11 +482,37 @@ fun ImageGrid(
     selectedImages: Set<CapturedImage> = emptySet(),
     onSelectImage: (CapturedImage, Boolean) -> Unit = { _, _ -> },
     isDownloading: Boolean = false,
-    selectionEnabled: Boolean = false
+    selectionEnabled: Boolean = false,
+    requestThumbnail: ((CapturedImage) -> Unit)? = null,
+    onPrefetchNearby: ((List<CapturedImage>) -> Unit)? = null
 ) {
+    val lastPrefetchIndex = remember { mutableStateOf(0) }
+    val lastPrefetchOffset = remember { mutableStateOf(0) }
+    val tileHeightPx = with(LocalDensity.current) { 100.dp.toPx().toInt() } // Approximate 100dp tile size
+
     LaunchedEffect(images.size) {
         if (images.isNotEmpty() && gridState.firstVisibleItemIndex == 0) {
             gridState.scrollToItem(images.size - 1)
+        }
+    }
+
+    LaunchedEffect(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset) {
+        val indexDelta = kotlin.math.abs(gridState.firstVisibleItemIndex - lastPrefetchIndex.value)
+        val offsetDelta = kotlin.math.abs(gridState.firstVisibleItemScrollOffset - lastPrefetchOffset.value)
+
+        // Trigger only if we've scrolled more than one tile's worth (index or offset)
+        if (indexDelta > 0 || offsetDelta > tileHeightPx) {
+            lastPrefetchIndex.value = gridState.firstVisibleItemIndex
+            lastPrefetchOffset.value = gridState.firstVisibleItemScrollOffset
+
+            val visible = gridState.layoutInfo.visibleItemsInfo.map { it.index }
+            if (visible.isNotEmpty()) {
+                val min = visible.minOrNull() ?: 0
+                val max = visible.maxOrNull() ?: 0
+                val prefetchRange = (min - 10).coerceAtLeast(0)..(max + 10).coerceAtMost(images.lastIndex)
+                val toPrefetch = images.slice(prefetchRange)
+                onPrefetchNearby?.invoke(toPrefetch)
+            }
         }
     }
 
@@ -457,6 +525,11 @@ fun ImageGrid(
         items(images, key = { it.uri }) { image ->
             val model = thumbnailCache[image.uri] ?: image.localUri ?: image.thumbnailUrl ?: image.remoteUrl
             val isSelected = selectedImages.contains(image)
+            if (requestThumbnail != null) {
+                LaunchedEffect(image.uri) {
+                    requestThumbnail(image)
+                }
+            }
 
             Box(
                 modifier = Modifier
@@ -488,7 +561,10 @@ fun ImageGrid(
                             .build(),
                         contentDescription = "Thumbnail",
                         contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        placeholder = painterResource(R.drawable.placeholder_thumbnail),
+                        error = painterResource(R.drawable.placeholder_thumbnail),
+                        fallback = painterResource(R.drawable.placeholder_thumbnail)
                     )
                 } else {
                     Box(
@@ -527,6 +603,69 @@ fun ImageGrid(
                         CircularProgressIndicator()
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun GroupedImageGrid(
+    images: List<CapturedImage>,
+    thumbnailCache: Map<String, Uri>,
+    listState: LazyListState,
+    selectedImages: Set<CapturedImage>,
+    isDownloading: Boolean,
+    selectionEnabled: Boolean,
+    onImageClick: (CapturedImage) -> Unit,
+    onLongClick: (CapturedImage) -> Unit = {},
+    onSelectImage: (CapturedImage, Boolean) -> Unit = { _, _ -> },
+    requestThumbnail: ((CapturedImage) -> Unit)? = null,
+    onPrefetchNearby: ((List<CapturedImage>) -> Unit)? = null
+) {
+    val imagesByDate = remember(images) {
+        images.groupBy { image ->
+            val dayStart = getStartOfDayMillis(image.timestamp)
+            formatDate(dayStart)
+        }
+    }
+
+    val sortedDates = remember(imagesByDate) {
+        imagesByDate.keys.sortedByDescending { dateStr ->
+            val sdf = SimpleDateFormat("d MMMM yyyy", Locale.ENGLISH)
+            sdf.parse(dateStr)?.time ?: 0L
+        }
+    }
+
+    LazyColumn(modifier = Modifier.fillMaxSize(), state = listState) {
+        sortedDates.forEach { dateStr ->
+            val dayImages = imagesByDate[dateStr] ?: emptyList()
+
+            item {
+                Text(
+                    text = dateStr,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.LightGray.copy(alpha = 0.3f))
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+
+            item {
+                val gridState = rememberLazyGridState()
+                ImageGrid(
+                    images = dayImages,
+                    thumbnailCache = thumbnailCache,
+                    gridState = gridState,
+                    onImageClick = onImageClick,
+                    onLongClick = onLongClick,
+                    selectedImages = selectedImages,
+                    onSelectImage = onSelectImage,
+                    isDownloading = isDownloading,
+                    selectionEnabled = selectionEnabled,
+                    requestThumbnail = requestThumbnail,
+                    onPrefetchNearby = onPrefetchNearby
+                )
             }
         }
     }

@@ -1,9 +1,7 @@
 package com.example.sonyrx10m3remote.gallery
 
 import android.content.Context
-import android.net.Uri
 import android.util.Log
-import android.widget.ImageView
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -13,19 +11,15 @@ import com.example.sonyrx10m3remote.media.MediaStoreHelper
 import com.example.sonyrx10m3remote.camera.CameraController
 import com.example.sonyrx10m3remote.camera.CameraController.ContentItem
 import com.example.sonyrx10m3remote.data.CapturedImage
-import java.net.URLDecoder
 import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.util.*
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import java.util.concurrent.TimeoutException
 
 enum class GalleryMode {
     SESSION,
@@ -36,6 +30,11 @@ enum class GalleryMode {
 enum class CameraSdViewType {
     IMAGES,
     VIDEOS
+}
+
+enum class GroupingMode {
+    FLAT,
+    BY_DATE
 }
 
 class GalleryViewModel(
@@ -51,8 +50,26 @@ class GalleryViewModel(
     val sessionImages: StateFlow<List<CapturedImage>> = _sessionImages
     private val _cameraSdImages = MutableStateFlow<List<CapturedImage>>(emptyList())
     val cameraSdImages: StateFlow<List<CapturedImage>> = _cameraSdImages
+    val cameraSdImagesByDate: Map<String, List<CapturedImage>>
+        get() {
+            return _cameraSdImages.value
+                .groupBy { image ->
+                    // Group by day start timestamp (UTC or local)
+                    val dayStartMillis = getStartOfDayMillis(image.timestamp)
+                    formatDate(dayStartMillis)
+                }
+        }
     private val _cameraSdVideos = MutableStateFlow<List<CapturedImage>>(emptyList())
     val cameraSdVideos: StateFlow<List<CapturedImage>> = _cameraSdVideos
+    val cameraSdVideosByDate: Map<String, List<CapturedImage>>
+        get() {
+            return _cameraSdVideos.value
+                .groupBy { video ->
+                    // Group by day start timestamp (UTC or local)
+                    val dayStartMillis = getStartOfDayMillis(video.timestamp)
+                    formatDate(dayStartMillis)
+                }
+        }
     private val _downloadedImages = MutableStateFlow<List<CapturedImage>>(emptyList())
     val downloadedImages: StateFlow<List<CapturedImage>> = _downloadedImages
 
@@ -99,6 +116,8 @@ class GalleryViewModel(
         _sessionLoading.value = false
     }
 
+    // --------------- Gallery UI ------------------
+
     fun onGalleryOpened() {
         viewModelScope.launch {
             // Set camera mode to Contents Transfer
@@ -116,6 +135,9 @@ class GalleryViewModel(
 
             // If a camera is connected, load the associated disk cache
             if (mediaManager != null && !cameraId.isNullOrEmpty()) {
+                val files = mediaManager?.listCachedThumbnails(cameraId) ?: emptyList()
+                Log.d("GalleryViewModel", "There are ${files.size} cached thumbnails")
+
                 try {
                     mediaManager.loadDiskCacheIntoLive(cameraId!!)
                     // Update UI StateFlows so cached thumbnails show immediately:
@@ -197,6 +219,8 @@ class GalleryViewModel(
         _cameraSdViewType.value = type
     }
 
+    // -------------- Data Fetching ----------------
+
     // Iteratively runs getContentList() to search through the directory structure of camera storage for image/video files
     fun loadCameraSdImages() {
         if (mediaManager == null || cameraController == null || cameraId.isNullOrBlank()) {
@@ -246,11 +270,15 @@ class GalleryViewModel(
                 // Now download missing thumbnails for camera SD images, update state as they arrive
                 launch {
                     mediaManager.downloadMissingThumbnails(cameraId, _cameraSdImages.value) { updatedImage ->
-                        // Update the list by replacing the image with updated localUri
                         val updatedList = _cameraSdImages.value.map {
                             if (it.uri == updatedImage.uri) updatedImage else it
                         }
                         _cameraSdImages.value = updatedList
+
+                        // Save updated metadata to disk
+                        launch {
+                            mediaManager.saveLiveCacheToDisk(cameraId)
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -369,9 +397,27 @@ class GalleryViewModel(
         _downloadedLoading.value = false
     }
 
-    fun clear() {
-        _sessionImages.value = emptyList()
-        _selectedImage.value = null
+    fun updateImage(updated: CapturedImage) {
+        _cameraSdImages.update { list ->
+            list.map { if (it.uri == updated.uri) updated else it }
+        }
+
+        _cameraSdVideos.update { list ->
+            list.map { if (it.uri == updated.uri) updated else it }
+        }
+    }
+
+    fun requestThumbnailIfNeeded(image: CapturedImage) {
+        val currentId = cameraId ?: return
+        mediaManager?.requestThumbnailDownload(currentId, image) { updated ->
+            updateImage(updated)
+        }
+    }
+
+    fun prefetchThumbnailsIfNeeded(images: List<CapturedImage>) {
+        for (image in images) {
+            requestThumbnailIfNeeded(image)
+        }
     }
 
     // -------------- Intervalometer ---------------
@@ -453,6 +499,22 @@ class GalleryViewModel(
         return "${prefix}_${timestamp}_$unique.$extension"
     }
 
+}
+
+fun formatDate(timestamp: Long): String {
+    val date = Date(timestamp)
+    val sdf = SimpleDateFormat("d MMMM yyyy", Locale.ENGLISH)
+    return sdf.format(date) // e.g. "14 June 2025"
+}
+
+fun getStartOfDayMillis(timestamp: Long): Long {
+    val calendar = Calendar.getInstance()
+    calendar.timeInMillis = timestamp
+    calendar.set(Calendar.HOUR_OF_DAY, 0)
+    calendar.set(Calendar.MINUTE, 0)
+    calendar.set(Calendar.SECOND, 0)
+    calendar.set(Calendar.MILLISECOND, 0)
+    return calendar.timeInMillis
 }
 
 class GalleryViewModelFactory(

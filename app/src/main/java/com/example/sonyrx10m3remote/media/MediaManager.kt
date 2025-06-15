@@ -16,13 +16,17 @@ import com.example.sonyrx10m3remote.camera.CameraController.ContentItem
 import com.example.sonyrx10m3remote.data.CacheManager
 import com.example.sonyrx10m3remote.data.CapturedImage
 import com.example.sonyrx10m3remote.gallery.SessionImageRepository
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.URL
+import kotlin.collections.joinToString
+import kotlin.collections.orEmpty
 
 class MediaManager(
     private val context: Context,
@@ -49,6 +53,7 @@ class MediaManager(
     // Variables for live image cache (thumbnail)
     private val _thumbnailCache = MutableStateFlow<Map<String, Uri>>(emptyMap())
     val thumbnailCache: StateFlow<Map<String, Uri>> get() = _thumbnailCache
+    private val pendingThumbnailDownloads = mutableSetOf<String>()
 
     // ---------------- Object Converters ----------------
 
@@ -122,7 +127,8 @@ class MediaManager(
 
         for (image in images) {
             // Skip if localUri exists or thumbnailUrl missing or already cached
-            if (image.localUri != null || image.thumbnailUrl == null || isThumbnailCached(image.uri)) continue
+            val hasValidLocalUri = image.localUri?.let { isLocalFileValid(it) } ?: false
+            if (hasValidLocalUri || image.thumbnailUrl == null || isThumbnailCached(image.uri)) continue
 
             val localUri = cacheManager.downloadAndSaveThumbnail(
                 cameraId = cameraId,
@@ -145,6 +151,26 @@ class MediaManager(
         }
     }
 
+    // Function to queue a thumbnail download for a requested image
+    fun requestThumbnailDownload(cameraId: String, image: CapturedImage, onDownloaded: (CapturedImage) -> Unit) {
+        // If already downloaded or in progress, skip
+        if (image.localUri != null || image.thumbnailUrl == null || pendingThumbnailDownloads.contains(image.uri)) return
+
+        pendingThumbnailDownloads.add(image.uri)
+
+        CoroutineScope(Dispatchers.IO).launch {
+            val localUri = cacheManager.downloadAndSaveThumbnail(cameraId, image.uri, image.thumbnailUrl)
+            if (localUri != null) {
+                _thumbnailCache.update { currentMap -> currentMap + (image.uri to localUri) }
+                val updatedImage = image.copy(localUri = localUri)
+                withContext(Dispatchers.Main) {
+                    onDownloaded(updatedImage)
+                }
+            }
+            pendingThumbnailDownloads.remove(image.uri)
+        }
+    }
+
     // ---------------- Disk Cache ----------------
 
     fun isThumbnailCached(uri: String): Boolean {
@@ -162,16 +188,31 @@ class MediaManager(
 
         clearCache()
 
-        // Build thumbnail cache map
         val thumbnailMap = mutableMapOf<String, Uri>()
+        var skippedItemsCount = 0
 
         cachedCapturedItems
             .distinctBy { it.uri }
             .forEach { captured ->
+                val localUri = captured.localUri
+                val isLocalFileValid = localUri?.path?.let { path ->
+                    val file = File(path)
+                    file.exists() && file.length() > 0
+                } ?: false
+
+                if (localUri != null && !isLocalFileValid) {
+                    Log.w(TAG, "Skipping cached item with invalid or missing local file at $localUri")
+                    skippedItemsCount++
+                    // Skip adding this cached item to live cache
+                    return@forEach
+                }
+
                 val item = capturedToContentItem(captured)
 
-                // Insert into thumbnail map if local URI exists
-                captured.localUri?.let { thumbnailMap[captured.uri] = it }
+                // Add to thumbnail cache if valid localUri exists
+                if (isLocalFileValid) {
+                    thumbnailMap[captured.uri] = localUri!!
+                }
 
                 when (item.contentKind?.lowercase()) {
                     "still", "image" -> _cachedImages.add(item)
@@ -182,7 +223,8 @@ class MediaManager(
                 _seenUris.add(item.uri)
             }
 
-        // Push map to StateFlow
+        Log.d(TAG, "Skipped $skippedItemsCount invalid cached items")
+
         _thumbnailCache.value = thumbnailMap
     }
 
@@ -205,6 +247,25 @@ class MediaManager(
         // Option A: delete entire folder
         cacheManager.clearCache(cameraId)
         Log.d(TAG, "Cleared disk cache for camera $cameraId")
+    }
+
+    // Helper function to check if a localUri points to a valid (uncorrupted/missing) file
+    fun isLocalFileValid(uri: Uri): Boolean {
+        val file = File(uri.path ?: return false)
+        return file.exists() && file.length() > 0
+    }
+
+    //Debug function
+    fun listCachedThumbnails(cameraId: String): List<File> {
+        val files = cacheManager.getThumbnailDir(cameraId).listFiles()
+        return if (files != null) {
+            val list = files.toList()
+            Log.d("MediaManager", "Cached thumbnails for $cameraId: ${list.joinToString { it.name }}")
+            list
+        } else {
+            Log.d("MediaManager", "No cached thumbnails found for $cameraId")
+            emptyList()
+        }
     }
 
     // ---------------- Session Media Handler ----------------

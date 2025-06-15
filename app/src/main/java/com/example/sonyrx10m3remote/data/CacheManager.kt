@@ -23,7 +23,7 @@ class CacheManager(private val context: Context) {
     }
 
     private fun getCameraCacheDir(cameraId: String): File {
-        val dir = File(context.getExternalFilesDir(null), "cache/$cameraId")
+        val dir = File(context.cacheDir, "SonyRX10M3Remote/cache/$cameraId")
 //        Log.d("CacheManager", "Camera cache dir path = ${dir.absolutePath}")
         if (!dir.exists()) dir.mkdirs().also {
             Log.d("CacheManager", "mkdirs() returned $it for ${dir.absolutePath}")
@@ -33,12 +33,6 @@ class CacheManager(private val context: Context) {
 
     private fun getMetadataDir(cameraId: String): File {
         val dir = File(getCameraCacheDir(cameraId), "metadata")
-        if (!dir.exists()) dir.mkdirs()
-        return dir
-    }
-
-    private fun getThumbnailDir(cameraId: String): File {
-        val dir = File(getCameraCacheDir(cameraId), "thumbnails")
         if (!dir.exists()) dir.mkdirs()
         return dir
     }
@@ -63,6 +57,7 @@ class CacheManager(private val context: Context) {
                     put("downloaded", image.downloaded)
                     put("contentKind", image.contentKind)
                     put("lastModified", image.lastModified)
+                    put("localUri", image.localUri?.toString())  // Save localUri as string or null
                 }
                 jsonArray.put(obj)
             }
@@ -77,7 +72,6 @@ class CacheManager(private val context: Context) {
     }
 
     suspend fun loadCachedMetadata(cameraId: String): List<CapturedImage> = withContext(Dispatchers.IO) {
-        val dir = getCameraCacheDir(cameraId)
         val metadataFile = File(getMetadataDir(cameraId), METADATA_FILE)
 
         if (!metadataFile.exists()) {
@@ -101,7 +95,8 @@ class CacheManager(private val context: Context) {
                         timestamp = obj.optLong("timestamp", 0L),
                         downloaded = obj.optBoolean("downloaded", false),
                         contentKind = obj.optString("contentKind", null),
-                        lastModified = obj.optLong("lastModified", System.currentTimeMillis())
+                        lastModified = obj.optLong("lastModified", System.currentTimeMillis()),
+                        localUri = obj.optString("localUri", null)?.let { Uri.parse(it) }  // parse localUri if exists
                     )
                 )
             }
@@ -171,6 +166,12 @@ class CacheManager(private val context: Context) {
         return file.exists() && file.length() > 0
     }
 
+   fun getThumbnailDir(cameraId: String): File {
+        val dir = File(getCameraCacheDir(cameraId), "thumbnails")
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
     // ----------------
 
     fun clearCache(cameraId: String): Boolean {
@@ -179,4 +180,12 @@ class CacheManager(private val context: Context) {
             Log.d(TAG, "Cache for camera $cameraId cleared: $it")
         }
     }
+
+//    fun cleanOldCacheLocation() {
+//        val oldCache = File(context.getExternalFilesDir(null), "cache")
+//        if (oldCache.exists()) {
+//            oldCache.deleteRecursively()
+//            Log.i("CacheMigration", "Old external cache directory deleted.")
+//        }
+//    }
 }

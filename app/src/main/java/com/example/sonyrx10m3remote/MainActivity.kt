@@ -37,6 +37,7 @@ import com.example.sonyrx10m3remote.camera.CameraController.CaptureResult
 import com.example.sonyrx10m3remote.camera.CameraDiscovery
 import com.example.sonyrx10m3remote.camera.CameraDiscovery.CameraInfo
 import com.example.sonyrx10m3remote.camera.Intervalometer
+import com.example.sonyrx10m3remote.data.CacheManager
 import com.example.sonyrx10m3remote.data.CapturedImage
 import com.example.sonyrx10m3remote.media.MediaManager
 import com.example.sonyrx10m3remote.media.MediaManagerProvider
