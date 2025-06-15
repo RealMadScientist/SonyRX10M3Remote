@@ -1,6 +1,8 @@
 package com.example.sonyrx10m3remote.gallery
 
 import android.net.Uri
+import android.util.Log
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -20,8 +22,10 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
@@ -32,10 +36,11 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.sonyrx10m3remote.camera.CameraController
 import com.example.sonyrx10m3remote.data.CapturedImage
+import com.example.sonyrx10m3remote.gallery.GalleryViewModel
 import com.example.sonyrx10m3remote.media.MediaManager
 import com.example.sonyrx10m3remote.R
-import java.text.SimpleDateFormat
 import java.util.*
+import kotlinx.coroutines.delay
 
 data class ScrollPosition(val index: Int = 0, val offset: Int = 0)
 
@@ -51,9 +56,6 @@ fun GalleryScreen(
     val cameraAvailable = cameraController != null
 
     val images by viewModel.sessionImages.collectAsState()
-    val cameraSdViewType by viewModel.cameraSdViewType.collectAsState()
-    val cameraSdImages by viewModel.cameraSdImages.collectAsState()
-    val cameraSdVideos by viewModel.cameraSdVideos.collectAsState()
     val sessionLoading by viewModel.sessionLoading.collectAsState()
     val cameraSdLoading by viewModel.cameraSdLoading.collectAsState()
     val downloadedLoading by viewModel.downloadedLoading.collectAsState()
@@ -62,13 +64,19 @@ fun GalleryScreen(
     val mode by viewModel.mode.collectAsState()
     val thumbnailCache by mediaManager?.thumbnailCache?.collectAsState() ?: remember { mutableStateOf(emptyMap()) }
 
+    val cachedDates by viewModel.cachedDates.collectAsState()
+    val datePreviews by viewModel.datePreviews.collectAsState()
+    val selectedDate by viewModel.selectedDate.collectAsState()
+    val contentForDate by viewModel.contentForDate.collectAsState()
+
     val chosenImages by viewModel.chosenImages.collectAsState()
     val capturedImages by viewModel.capturedImages.collectAsState()
     val showPopup by viewModel.showIntervalPopup.collectAsState()
     val isDownloading by viewModel.isDownloading.collectAsState()
     val isInSelectionMode by viewModel.isInSelectionMode.collectAsState()
+    val loadingDates by viewModel.loadingDates.collectAsState()
+    val isSelectedDateLoading by viewModel.isSelectedDateLoading.collectAsState()
 
-    var groupingMode by mutableStateOf(GroupingMode.FLAT)
     var ungroupedScrollPosition by remember { mutableStateOf(ScrollPosition()) }
     var groupedScrollPosition by remember { mutableStateOf(ScrollPosition()) }
     val ungroupedGridState = rememberLazyGridState()
@@ -76,10 +84,7 @@ fun GalleryScreen(
 
     val shownImages = when (mode) {
         GalleryMode.SESSION -> images
-        GalleryMode.CAMERA_SD -> when (cameraSdViewType) {
-            CameraSdViewType.IMAGES -> cameraSdImages
-            CameraSdViewType.VIDEOS -> cameraSdVideos
-        }
+        GalleryMode.CAMERA_SD -> contentForDate
         GalleryMode.DOWNLOADED -> downloadedImages
     }
 
@@ -99,14 +104,13 @@ fun GalleryScreen(
         }
     }
 
-    LaunchedEffect(groupingMode) {
-        if (groupingMode == GroupingMode.FLAT) {
-            ungroupedGridState.scrollToItem(ungroupedScrollPosition.index, ungroupedScrollPosition.offset)
-        } else if (groupingMode == GroupingMode.BY_DATE) {
-            groupedListState.scrollToItem(groupedScrollPosition.index, groupedScrollPosition.offset)
+    LaunchedEffect(cachedDates, mode) {
+        if (mode == GalleryMode.CAMERA_SD) {
+            if (cachedDates.isNotEmpty()) {
+                groupedListState.scrollToItem(((cachedDates.size * 2) - 1).coerceAtLeast(0))
+            }
         }
     }
-
 
     LaunchedEffect(ungroupedGridState.firstVisibleItemIndex, ungroupedGridState.firstVisibleItemScrollOffset) {
         ungroupedScrollPosition = ScrollPosition(ungroupedGridState.firstVisibleItemIndex, ungroupedGridState.firstVisibleItemScrollOffset)
@@ -114,6 +118,17 @@ fun GalleryScreen(
 
     LaunchedEffect(groupedListState.firstVisibleItemIndex, groupedListState.firstVisibleItemScrollOffset) {
         groupedScrollPosition = ScrollPosition(groupedListState.firstVisibleItemIndex, groupedListState.firstVisibleItemScrollOffset)
+    }
+
+    BackHandler(enabled = selected != null || selectedDate != null) {
+        when {
+            selected != null -> {
+                viewModel.selectImage(null)   // close fullscreen image -> go back to image grid
+            }
+            selectedDate != null -> {
+                viewModel.selectDate(null)    // close date group -> go back to grouped image list
+            }
+        }
     }
 
     DisposableEffect(Unit) {
@@ -149,12 +164,6 @@ fun GalleryScreen(
                                 Text("Download (${chosenImages.size})")
                             }
                         }
-                    } else {
-                        // 📷 Show Images/Videos toggle when not selecting
-                        CameraSdTypeToggle(
-                            selectedType = cameraSdViewType,
-                            onSelectType = viewModel::setCameraSdViewType
-                        )
                     }
                 }
                 GalleryBottomBar(
@@ -178,91 +187,131 @@ fun GalleryScreen(
         ) {
             when (mode) {
                 GalleryMode.CAMERA_SD -> {
-                    val isImagesView = cameraSdViewType == CameraSdViewType.IMAGES
-                    val items = if (isImagesView) cameraSdImages else cameraSdVideos
+                    val date = selectedDate
+                    val filteredContent = contentForDate
 
-                    if (selected != null) {
-                        FullscreenImagePager(
-                            images = items,
-                            startImage = selected!!,
-                            onClose = { viewModel.selectImage(null) }
-                        )
-                    } else {
-                        when {
-                            cameraSdLoading && items.isEmpty() -> {
-                                Column(modifier = Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                                    CircularProgressIndicator()
-                                    Spacer(modifier = Modifier.height(16.dp))
-                                    Text("Loading... this may take a while.")
-                                }
+                    when {
+                        selected != null -> {
+                            // Fullscreen image viewer for a selected image
+                            FullscreenImagePager(
+                                images = filteredContent,
+                                startImage = selected!!,
+                                onClose = { viewModel.selectImage(null) }
+                            )
+                        }
+
+                        cameraSdLoading -> {
+                            Column(
+                                modifier = Modifier.align(Alignment.Center),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                CircularProgressIndicator()
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text("Loading...this may take a while.")
                             }
-                            items.isNotEmpty() -> {
-                                Box {
-                                    when (groupingMode) {
-                                        GroupingMode.FLAT -> {
-                                            ImageGrid(
-                                                images = items,
-                                                thumbnailCache = thumbnailCache,
-                                                gridState = ungroupedGridState,
-                                                onImageClick = { image ->
-                                                    if (!isInSelectionMode) {
-                                                        viewModel.selectImage(image)
-                                                    }
-                                                },
-                                                onLongClick = {
-                                                    if (!isInSelectionMode) viewModel.enterSelectionMode()
-                                                },
-                                                selectedImages = chosenImages,
-                                                isDownloading = isDownloading,
-                                                selectionEnabled = isInSelectionMode,
-                                                onSelectImage = { image, selected ->
-                                                    viewModel.updateChosenImage(image, selected)
-                                                },
-                                                requestThumbnail = { viewModel.requestThumbnailIfNeeded(it) },
-                                                onPrefetchNearby = { viewModel.prefetchThumbnailsIfNeeded(it) }
-                                            )
-                                        }
-                                        GroupingMode.BY_DATE -> {
-                                            GroupedImageGrid(
-                                                images = items,
-                                                thumbnailCache = thumbnailCache,
-                                                listState = groupedListState,
-                                                onImageClick = { image ->
-                                                    if (!isInSelectionMode) {
-                                                        viewModel.selectImage(image)
-                                                    }
-                                                },
-                                                onLongClick = {
-                                                    if (!isInSelectionMode) viewModel.enterSelectionMode()
-                                                },
-                                                selectedImages = chosenImages,
-                                                isDownloading = isDownloading,
-                                                selectionEnabled = isInSelectionMode,
-                                                onSelectImage = { image, selected ->
-                                                    viewModel.updateChosenImage(image, selected)
-                                                },
-                                                requestThumbnail = { viewModel.requestThumbnailIfNeeded(it) },
-                                                onPrefetchNearby = { viewModel.prefetchThumbnailsIfNeeded(it) }
-                                            )
+                        }
+
+                        selectedDate != null -> {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(top = 8.dp),
+                            ) {
+                                Text(
+                                    text = "Viewing: ${formatDateKey(date!!)}",
+                                    modifier = Modifier
+                                        .align(Alignment.CenterHorizontally)
+                                        .padding(bottom = 8.dp),
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+
+                                if (filteredContent.isEmpty()) {
+                                    Column(
+                                        modifier = Modifier.fillMaxSize().wrapContentSize(Alignment.Center),
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        if (isSelectedDateLoading) {
+                                            CircularProgressIndicator()
+                                            Spacer(modifier = Modifier.height(16.dp))
+                                            Text("Loading images for $selectedDate...")
+                                        } else {
+                                            Text("No images found for $selectedDate")
                                         }
                                     }
-
-                                    if (cameraSdLoading) {
-                                        LinearProgressIndicator(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(4.dp)
-                                                .align(Alignment.TopCenter)
-                                        )
-                                    }
-                                }
-                            }
-                            !cameraSdLoading && items.isEmpty() -> {
-                                Column(modifier = Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text("No images found on camera SD.")
+                                } else {
+                                    ImageGrid(
+                                        images = filteredContent,
+                                        thumbnailCache = thumbnailCache,
+                                        gridState = gridState,
+                                        onImageClick = { image ->
+                                            if (!isInSelectionMode) {
+                                                viewModel.selectImage(image)
+                                            }
+                                        },
+                                        onLongClick = {
+                                            if (!isInSelectionMode) viewModel.enterSelectionMode()
+                                        },
+                                        selectedImages = chosenImages,
+                                        isDownloading = isDownloading,
+                                        selectionEnabled = isInSelectionMode,
+                                        onSelectImage = { image, selected ->
+                                            viewModel.updateChosenImage(image, selected)
+                                        },
+                                        requestThumbnail = { viewModel.requestThumbnailIfNeeded(it) },
+                                        onPrefetchNearby = { viewModel.prefetchThumbnailsIfNeeded(it) }
+                                    )
                                 }
                             }
                         }
+
+                        else -> {
+                            // No date selected, show list of date groups or a "no images" message if no dates
+                            if (cachedDates.isEmpty()) {
+                                Column(
+                                    modifier = Modifier.align(Alignment.Center),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text("No images found on camera SD.")
+                                }
+                            } else {
+                                GroupedImageGrid(
+                                    dates = cachedDates.asReversed(),
+                                    datePreviews = datePreviews,
+                                    thumbnailCache = thumbnailCache,
+                                    listState = groupedListState,
+                                    selectedImages = chosenImages,
+                                    isDownloading = isDownloading,
+                                    selectionEnabled = isInSelectionMode,
+                                    onImageClick = { date ->
+                                        if (!isInSelectionMode) {
+                                            viewModel.selectDate(date)
+                                        }
+                                    },
+                                    onLongClick = {
+                                        if (!isInSelectionMode) viewModel.enterSelectionMode()
+                                    },
+                                    onSelectImage = { image, selected ->
+                                        viewModel.updateChosenImage(image, selected)
+                                    },
+                                    requestThumbnail = { viewModel.requestThumbnailIfNeeded(it) },
+                                    onPrefetchNearby = { viewModel.prefetchThumbnailsIfNeeded(it) },
+                                    onDateClick = { date ->
+                                        viewModel.selectDate(date) // Sets selectedDate and triggers loading
+                                    },
+                                    onDateGroupVisible = { viewModel.loadPreviewMetadataIfCached(it) },
+                                    loadingDates = loadingDates
+                                )
+                            }
+                        }
+                    }
+
+                    if (isDownloading) {
+                        LinearProgressIndicator(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(4.dp)
+                                .align(Alignment.TopCenter)
+                        )
                     }
                 }
                 GalleryMode.SESSION -> {
@@ -608,64 +657,175 @@ fun ImageGrid(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun GroupedImageGrid(
-    images: List<CapturedImage>,
+    dates: List<String>,                     // full flat list still needed for grouping/sorting keys
+    datePreviews: Map<String, List<CapturedImage>>,  // <-- new previews map keyed by date
     thumbnailCache: Map<String, Uri>,
     listState: LazyListState,
     selectedImages: Set<CapturedImage>,
     isDownloading: Boolean,
     selectionEnabled: Boolean,
-    onImageClick: (CapturedImage) -> Unit,
+    onImageClick: (String) -> Unit,  // <-- change here
     onLongClick: (CapturedImage) -> Unit = {},
     onSelectImage: (CapturedImage, Boolean) -> Unit = { _, _ -> },
     requestThumbnail: ((CapturedImage) -> Unit)? = null,
-    onPrefetchNearby: ((List<CapturedImage>) -> Unit)? = null
+    onPrefetchNearby: ((List<CapturedImage>) -> Unit)? = null,
+    onDateClick: (String) -> Unit,
+    onDateGroupVisible: (String) -> Unit,
+    loadingDates: Set<String>
 ) {
-    val imagesByDate = remember(images) {
-        images.groupBy { image ->
-            val dayStart = getStartOfDayMillis(image.timestamp)
-            formatDate(dayStart)
+    val triggeredPreviews = remember { mutableStateListOf<String>() }
+
+    // Observe visible items outside LazyColumn, call onDateGroupVisible as needed
+    val visibleIndices by remember {
+        derivedStateOf {
+            listState.layoutInfo.visibleItemsInfo.map { it.index }
         }
     }
 
-    val sortedDates = remember(imagesByDate) {
-        imagesByDate.keys.sortedByDescending { dateStr ->
-            val sdf = SimpleDateFormat("d MMMM yyyy", Locale.ENGLISH)
-            sdf.parse(dateStr)?.time ?: 0L
+    LaunchedEffect(visibleIndices) {
+        // Assuming each header is at index = date index * 2 (header + content alternating)
+        dates.forEachIndexed { index, dateStr ->
+            val headerIndex = index * 2
+            if (visibleIndices.contains(headerIndex)) {
+                onDateGroupVisible(dateStr)
+            }
         }
     }
 
     LazyColumn(modifier = Modifier.fillMaxSize(), state = listState) {
-        sortedDates.forEach { dateStr ->
-            val dayImages = imagesByDate[dateStr] ?: emptyList()
+        dates.forEach { dateStr ->
+            val isLoading = loadingDates.contains(dateStr)
+            val previewImages = datePreviews[dateStr] ?: emptyList()
 
             item {
                 Text(
-                    text = dateStr,
+                    text = formatDateKey(dateStr),
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(Color.LightGray.copy(alpha = 0.3f))
                         .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .clickable { onDateClick(dateStr) }
                 )
             }
 
-            item {
-                val gridState = rememberLazyGridState()
-                ImageGrid(
-                    images = dayImages,
-                    thumbnailCache = thumbnailCache,
-                    gridState = gridState,
-                    onImageClick = onImageClick,
-                    onLongClick = onLongClick,
-                    selectedImages = selectedImages,
-                    onSelectImage = onSelectImage,
-                    isDownloading = isDownloading,
-                    selectionEnabled = selectionEnabled,
-                    requestThumbnail = requestThumbnail,
-                    onPrefetchNearby = onPrefetchNearby
-                )
+            item(key = "previews-$dateStr") {
+                // Lazy thumbnail fetch trigger
+                if (!triggeredPreviews.contains(dateStr)) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .onGloballyPositioned {
+                                if (!triggeredPreviews.contains(dateStr)) {
+                                    triggeredPreviews.add(dateStr)
+                                    previewImages
+                                        .take(4)
+                                        .filter { it.localUri == null && it.thumbnailUrl != null }
+                                        .forEach { image ->
+                                            requestThumbnail?.invoke(image)
+                                        }
+                                }
+                            }
+                    ) {}
+                }
+
+                if (isLoading) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(80.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        previewImages.forEach { image ->
+                            val model = thumbnailCache[image.uri]
+                                ?: image.localUri
+                                ?: image.thumbnailUrl
+                                ?: image.remoteUrl
+
+                            val isSelected = selectedImages.contains(image)
+
+                            Box(
+                                modifier = Modifier
+                                    .size(80.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .combinedClickable(
+                                        onClick = {
+                                            if (isDownloading) return@combinedClickable
+                                            if (selectionEnabled) {
+                                                onSelectImage(image, !isSelected)
+                                            } else {
+                                                Log.d(
+                                                    "GroupedImageGrid",
+                                                    "Clicked preview image: $image"
+                                                )
+                                                onDateClick(dateStr)
+                                            }
+                                        },
+                                        onLongClick = {
+                                            if (isDownloading) return@combinedClickable
+                                            onLongClick(image)
+                                        }
+                                    )
+                            ) {
+                                if (model != null) {
+                                    AsyncImage(
+                                        model = model,
+                                        contentDescription = "Thumbnail",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(Color.Gray),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text("No preview", color = Color.White)
+                                    }
+                                }
+
+                                if (isSelected) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(Color.Black.copy(alpha = 0.5f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = "Selected",
+                                            tint = Color.White
+                                        )
+                                    }
+                                }
+
+                                if (isDownloading) {
+                                    Box(
+                                        modifier = Modifier
+                                            .matchParentSize()
+                                            .background(Color.Black.copy(alpha = 0.5f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        CircularProgressIndicator()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

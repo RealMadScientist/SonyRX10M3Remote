@@ -25,8 +25,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.URL
+import java.time.*
 import kotlin.collections.joinToString
-import kotlin.collections.orEmpty
 
 class MediaManager(
     private val context: Context,
@@ -44,11 +44,7 @@ class MediaManager(
 
     // Variables for live image cache (metadata)
     private val _seenUris = mutableSetOf<String>()
-    private val _cachedImages = mutableListOf<ContentItem>()
-    private val _cachedVideos = mutableListOf<ContentItem>()
     val seenUris: MutableSet<String> = mutableSetOf()
-    val cachedImages: List<ContentItem> get() = _cachedImages
-    val cachedVideos: List<ContentItem> get() = _cachedVideos
 
     // Variables for live image cache (thumbnail)
     private val _thumbnailCache = MutableStateFlow<Map<String, Uri>>(emptyMap())
@@ -90,67 +86,16 @@ class MediaManager(
         )
     }
 
-    // ---------------- Live Image Cache ----------------
+    // ---------------- Thumbnail Management ----------------
 
-    fun addToCache(images: List<ContentItem>, videos: List<ContentItem>) {
-        val imageMap = _cachedImages.associateBy { it.uri }.toMutableMap()
-        for (item in images) {
-            imageMap[item.uri] = item // Overwrites existing entries with updated ones
-        }
-        _cachedImages.clear()
-        _cachedImages.addAll(imageMap.values)
-
-        val videoMap = _cachedVideos.associateBy { it.uri }.toMutableMap()
-        for (item in videos) {
-            videoMap[item.uri] = item
-        }
-        _cachedVideos.clear()
-        _cachedVideos.addAll(videoMap.values)
-    }
-
-    fun clearCache() {
-        _seenUris.clear()
-        _cachedImages.clear()
-        _cachedVideos.clear()
+    fun isThumbnailCached(uri: String): Boolean {
+        return _thumbnailCache.value.containsKey(uri)
     }
 
     /**
      * Downloads missing thumbnails for the given images and updates the thumbnail cache.
      * Calls [onDownloaded] with each updated CapturedImage if provided.
      */
-    suspend fun downloadMissingThumbnails(
-        cameraId: String?,
-        images: List<CapturedImage>,
-        onDownloaded: (CapturedImage) -> Unit
-    ) {
-        if (cameraId == null) return
-
-        for (image in images) {
-            // Skip if localUri exists or thumbnailUrl missing or already cached
-            val hasValidLocalUri = image.localUri?.let { isLocalFileValid(it) } ?: false
-            if (hasValidLocalUri || image.thumbnailUrl == null || isThumbnailCached(image.uri)) continue
-
-            val localUri = cacheManager.downloadAndSaveThumbnail(
-                cameraId = cameraId,
-                imageUri = image.uri,
-                thumbnailUrl = image.thumbnailUrl
-            )
-
-            if (localUri != null) {
-                // Update internal cache map
-                _thumbnailCache.update { currentMap ->
-                    currentMap + (image.uri to localUri)
-                }
-
-                val updated = image.copy(localUri = localUri)
-
-                withContext(Dispatchers.Main) {
-                    onDownloaded(updated)
-                }
-            }
-        }
-    }
-
     // Function to queue a thumbnail download for a requested image
     fun requestThumbnailDownload(cameraId: String, image: CapturedImage, onDownloaded: (CapturedImage) -> Unit) {
         // If already downloaded or in progress, skip
@@ -171,72 +116,116 @@ class MediaManager(
         }
     }
 
+    // ---------------- Live Cache ----------------
+
+    // For full disk cache refresh
+    var cachedImagesByDate: MutableMap<String, MutableList<CapturedImage>> = mutableMapOf()
+    var cachedVideosByDate: MutableMap<String, MutableList<CapturedImage>> = mutableMapOf()
+
+    fun clearCache(cameraId: String) {
+        try {
+            // Clear the thumbnailCache StateFlow by emitting an empty map
+            _thumbnailCache.value = emptyMap()
+
+            // Clear seenUris set as usual
+            _seenUris.clear()
+
+            // Clear disk cache files
+            val success = cacheManager.clearCache(cameraId)
+
+            Log.d("MediaManager", "Cache cleared for camera $cameraId: $success")
+
+        } catch (e: Exception) {
+            Log.e("MediaManager", "Error clearing cache: ${e.localizedMessage}")
+        }
+    }
+
     // ---------------- Disk Cache ----------------
 
-    fun isThumbnailCached(uri: String): Boolean {
-        return _thumbnailCache.value.containsKey(uri)
+    suspend fun getCachedDates(cameraId: String): List<String> {
+        return cacheManager.loadKnownDates(cameraId)
     }
 
-    /**
-     * Load from disk cache into live cache.
-     * Clears existing live cache first, then populates from disk.
-     * Must be called from a coroutine/suspend context.
-     */
-    suspend fun loadDiskCacheIntoLive(cameraId: String) {
-        val cachedCapturedItems = cacheManager.loadCachedMetadata(cameraId)
-        Log.d(TAG, "Loaded ${cachedCapturedItems.size} items from disk cache for camera $cameraId")
+    suspend fun loadMetadataForDate(cameraId: String, dateKey: String): List<ContentItem> {
+        val capturedImages = cacheManager.loadCachedMetadataForDate(cameraId, dateKey)
+        val result = mutableListOf<ContentItem>()
 
-        clearCache()
+        for (captured in capturedImages) {
+            val localUri = captured.localUri
+            val valid = localUri?.let { isLocalFileValid(it) } ?: false
+            if (localUri != null && !valid) continue
 
-        val thumbnailMap = mutableMapOf<String, Uri>()
-        var skippedItemsCount = 0
+            val content = capturedToContentItem(captured)
 
-        cachedCapturedItems
-            .distinctBy { it.uri }
-            .forEach { captured ->
-                val localUri = captured.localUri
-                val isLocalFileValid = localUri?.path?.let { path ->
-                    val file = File(path)
-                    file.exists() && file.length() > 0
-                } ?: false
-
-                if (localUri != null && !isLocalFileValid) {
-                    Log.w(TAG, "Skipping cached item with invalid or missing local file at $localUri")
-                    skippedItemsCount++
-                    // Skip adding this cached item to live cache
-                    return@forEach
-                }
-
-                val item = capturedToContentItem(captured)
-
-                // Add to thumbnail cache if valid localUri exists
-                if (isLocalFileValid) {
-                    thumbnailMap[captured.uri] = localUri!!
-                }
-
-                when (item.contentKind?.lowercase()) {
-                    "still", "image" -> _cachedImages.add(item)
-                    "video", "movie" -> _cachedVideos.add(item)
-                    else -> _cachedImages.add(item)
-                }
-
-                _seenUris.add(item.uri)
+            if (valid) {
+                _thumbnailCache.update { it + (captured.uri to localUri!!) }
             }
 
-        Log.d(TAG, "Skipped $skippedItemsCount invalid cached items")
+            _seenUris.add(content.uri)
+            result.add(content)
+        }
 
-        _thumbnailCache.value = thumbnailMap
+        return result
+    }
+
+    suspend fun loadPreviewImagesForDate(
+        cameraId: String,
+        dateKey: String,
+        count: Int = 4
+    ): List<CapturedImage> {
+        return cacheManager.loadCachedMetadataForDate(cameraId, dateKey).take(count)
     }
 
     /**
-     * Persist current live cache to disk.
-     * Must be called from a coroutine/suspend context.
+     * Save the current live cache to disk, grouped by date.
+     * @param cameraId The camera ID.
+     * @param groupedCapturedImages Map of dateKey -> List<CapturedImage>
      */
-    suspend fun saveLiveCacheToDisk(cameraId: String) {
-        // Convert all live cache items to CapturedImage
-        val allItems = (_cachedImages + _cachedVideos).map { contentToCaptured(it) }
-        cacheManager.saveCachedMetadata(cameraId, allItems)
-        Log.d(TAG, "Saved ${allItems.size} live cache items to disk for camera $cameraId")
+    suspend fun saveCacheToDisk(
+        cameraId: String,
+        cachedDates: List<String>,
+        contentForDate: Map<String, List<CapturedImage>>,
+        selectedDate: String?
+    ) {
+        try {
+            // Always save the known date index to disk
+            cacheManager.saveKnownDates(cameraId, cachedDates)
+
+            // Only update metadata for selectedDate if we have it
+            if (selectedDate != null && contentForDate.containsKey(selectedDate)) {
+                val capturedImages = contentForDate[selectedDate] ?: emptyList()
+                cacheManager.saveCachedMetadataForDate(cameraId, selectedDate, capturedImages)
+                Log.d("MediaManager", "Saved metadata for selected date: $selectedDate")
+            }
+
+            Log.d("MediaManager", "Partial cache save complete for camera $cameraId")
+
+        } catch (e: Exception) {
+            Log.e("MediaManager", "Error saving cache to disk: ${e.localizedMessage}")
+        }
+    }
+
+    /**
+     * Save the entire cache to disk.
+     */
+    suspend fun saveCacheToDiskFull(
+        cameraId: String,
+        cachedDates: List<String>,
+        contentForDate: Map<String, List<CapturedImage>>
+    ) {
+        try {
+            cacheManager.saveKnownDates(cameraId, cachedDates)
+
+            for (dateKey in cachedDates) {
+                val capturedImages = contentForDate[dateKey] ?: emptyList()
+                cacheManager.saveCachedMetadataForDate(cameraId, dateKey, capturedImages)
+                Log.d("MediaManager", "Saved metadata for date: $dateKey")
+            }
+
+            Log.d("MediaManager", "Full cache save complete for camera $cameraId")
+        } catch (e: Exception) {
+            Log.e("MediaManager", "Error saving full cache to disk: ${e.localizedMessage}")
+        }
     }
 
     /**
@@ -253,19 +242,6 @@ class MediaManager(
     fun isLocalFileValid(uri: Uri): Boolean {
         val file = File(uri.path ?: return false)
         return file.exists() && file.length() > 0
-    }
-
-    //Debug function
-    fun listCachedThumbnails(cameraId: String): List<File> {
-        val files = cacheManager.getThumbnailDir(cameraId).listFiles()
-        return if (files != null) {
-            val list = files.toList()
-            Log.d("MediaManager", "Cached thumbnails for $cameraId: ${list.joinToString { it.name }}")
-            list
-        } else {
-            Log.d("MediaManager", "No cached thumbnails found for $cameraId")
-            emptyList()
-        }
     }
 
     // ---------------- Session Media Handler ----------------
