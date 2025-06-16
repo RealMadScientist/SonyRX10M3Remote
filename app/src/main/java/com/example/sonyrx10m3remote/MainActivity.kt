@@ -1253,6 +1253,10 @@ class MainActivity : AppCompatActivity() {
         val countdownTime = durationMs + 1000L
         val startTime = System.currentTimeMillis()
 
+        val captureDeferred = CoroutineScope(Dispatchers.IO).async {
+            cameraController.captureStill()
+        }
+
         withContext(Dispatchers.Main) {
             var timeLeft: Long
             do {
@@ -1262,11 +1266,9 @@ class MainActivity : AppCompatActivity() {
                     delay(250)
                 }
             } while (timeLeft > 0)
-
-            btnCapture.text = "Capturing…"
         }
 
-        val result = cameraController.captureStill()
+        val result = captureDeferred.await()
 
         withContext(Dispatchers.Main) {
             btnCapture.text = "Capture"

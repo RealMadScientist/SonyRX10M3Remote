@@ -7,6 +7,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.lazy.grid.*
@@ -23,7 +24,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
@@ -91,10 +96,6 @@ fun GalleryScreen(
     val gridState = rememberLazyGridState()
     val lastScrollIndex = remember { mutableStateOf<Int?>(null) }
 
-    LaunchedEffect(Unit) {
-        viewModel.onGalleryOpened()
-    }
-
     // Switch camera mode when this screen is shown/hidden
     LaunchedEffect(lastScrollIndex.value) {
         val index = lastScrollIndex.value
@@ -131,52 +132,48 @@ fun GalleryScreen(
         }
     }
 
-    DisposableEffect(Unit) {
-        onDispose {
-            viewModel.onGalleryClosed()
-        }
-    }
-
     Scaffold(
         bottomBar = {
-            Column {
-                if (mode == GalleryMode.CAMERA_SD) {
-                    if (isInSelectionMode) {
-                        // 🔁 Replace toggle with selection buttons
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(8.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly
-                        ) {
-                            Button(
-                                onClick = { viewModel.exitSelectionMode() },
-                                modifier = Modifier.weight(1f).padding(end = 4.dp)
+            if (selected == null) {
+                Column {
+                    if (mode == GalleryMode.CAMERA_SD) {
+                        if (isInSelectionMode) {
+                            // 🔁 Replace toggle with selection buttons
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(8.dp),
+                                horizontalArrangement = Arrangement.SpaceEvenly
                             ) {
-                                Text("Cancel")
-                            }
+                                Button(
+                                    onClick = { viewModel.exitSelectionMode() },
+                                    modifier = Modifier.weight(1f).padding(end = 4.dp)
+                                ) {
+                                    Text("Cancel")
+                                }
 
-                            Button(
-                                onClick = onDownloadSelected,
-                                modifier = Modifier.weight(1f).padding(start = 4.dp),
-                                enabled = chosenImages.isNotEmpty()
-                            ) {
-                                Text("Download (${chosenImages.size})")
+                                Button(
+                                    onClick = onDownloadSelected,
+                                    modifier = Modifier.weight(1f).padding(start = 4.dp),
+                                    enabled = chosenImages.isNotEmpty()
+                                ) {
+                                    Text("Download (${chosenImages.size})")
+                                }
                             }
                         }
                     }
+                    GalleryBottomBar(
+                        currentMode = mode,
+                        onModeSelected = { newMode ->
+                            if (newMode == GalleryMode.CAMERA_SD && !cameraAvailable) {
+                                // Maybe show a Toast or snackbar here to notify user
+                                return@GalleryBottomBar
+                            }
+                            viewModel.setMode(newMode)
+                        },
+                        cameraAvailable = cameraAvailable
+                    )
                 }
-                GalleryBottomBar(
-                    currentMode = mode,
-                    onModeSelected = { newMode ->
-                        if (newMode == GalleryMode.CAMERA_SD && !cameraAvailable) {
-                            // Maybe show a Toast or snackbar here to notify user
-                            return@GalleryBottomBar
-                        }
-                        viewModel.setMode(newMode)
-                    },
-                    cameraAvailable = cameraAvailable
-                )
             }
         }
     ) { paddingValues ->
@@ -527,7 +524,7 @@ fun ImageGrid(
     thumbnailCache: Map<String, Uri>,
     gridState: LazyGridState,
     onImageClick: (CapturedImage) -> Unit,
-    onLongClick: (CapturedImage) -> Unit = {}, // default no-op
+    onLongClick: (CapturedImage) -> Unit = {},
     selectedImages: Set<CapturedImage> = emptySet(),
     onSelectImage: (CapturedImage, Boolean) -> Unit = { _, _ -> },
     isDownloading: Boolean = false,
@@ -537,7 +534,22 @@ fun ImageGrid(
 ) {
     val lastPrefetchIndex = remember { mutableStateOf(0) }
     val lastPrefetchOffset = remember { mutableStateOf(0) }
-    val tileHeightPx = with(LocalDensity.current) { 100.dp.toPx().toInt() } // Approximate 100dp tile size
+    val tileHeightPx = with(LocalDensity.current) { 100.dp.toPx().toInt() }
+
+    val toggledDuringDrag = remember { mutableSetOf<CapturedImage>() }
+    val lastToggleTimes = remember { mutableMapOf<CapturedImage, Long>() }
+    val toggleCooldownMs = 300L
+
+    fun canToggle(image: CapturedImage): Boolean {
+        val now = System.currentTimeMillis()
+        val lastToggle = lastToggleTimes[image] ?: 0L
+        return if (now - lastToggle > toggleCooldownMs) {
+            lastToggleTimes[image] = now
+            true
+        } else {
+            false
+        }
+    }
 
     LaunchedEffect(images.size) {
         if (images.isNotEmpty() && gridState.firstVisibleItemIndex == 0) {
@@ -549,7 +561,6 @@ fun ImageGrid(
         val indexDelta = kotlin.math.abs(gridState.firstVisibleItemIndex - lastPrefetchIndex.value)
         val offsetDelta = kotlin.math.abs(gridState.firstVisibleItemScrollOffset - lastPrefetchOffset.value)
 
-        // Trigger only if we've scrolled more than one tile's worth (index or offset)
         if (indexDelta > 0 || offsetDelta > tileHeightPx) {
             lastPrefetchIndex.value = gridState.firstVisibleItemIndex
             lastPrefetchOffset.value = gridState.firstVisibleItemScrollOffset
@@ -565,91 +576,128 @@ fun ImageGrid(
         }
     }
 
-    LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = 100.dp),
-        contentPadding = PaddingValues(4.dp),
-        modifier = Modifier.fillMaxSize(),
-        state = gridState
-    ) {
-        items(images, key = { it.uri }) { image ->
-            val model = thumbnailCache[image.uri] ?: image.localUri ?: image.thumbnailUrl ?: image.remoteUrl
-            val isSelected = selectedImages.contains(image)
-            if (requestThumbnail != null) {
-                LaunchedEffect(image.uri) {
-                    requestThumbnail(image)
-                }
-            }
+    Box(
+        modifier = if (selectionEnabled) {
+            Modifier
+                .fillMaxSize()
+                .pointerInput(images, selectedImages) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val pointer = event.changes.firstOrNull() ?: continue
+                            val pos = pointer.position
 
-            Box(
-                modifier = Modifier
-                    .padding(4.dp)
-                    .aspectRatio(1f)
-                    .combinedClickable(
-                        onClick = {
-                            if (isDownloading) return@combinedClickable // ignore clicks during download
-
-                            if (selectionEnabled) {
-                                // Toggle selection state
-                                onSelectImage(image, !isSelected)
-                            } else {
-                                // Normal image click
-                                onImageClick(image)
+                            val hitItemInfo = gridState.layoutInfo.visibleItemsInfo.find { info ->
+                                val xInBounds = pos.x >= info.offset.x && pos.x <= info.offset.x + info.size.width
+                                val yInBounds = pos.y >= info.offset.y && pos.y <= info.offset.y + info.size.height
+                                xInBounds && yInBounds
                             }
-                        },
-                        onLongClick = {
-                            if (isDownloading) return@combinedClickable
-                            onLongClick(image)
+
+                            if (hitItemInfo != null) {
+                                val image = images.getOrNull(hitItemInfo.index)
+                                if (image != null && !toggledDuringDrag.contains(image) && canToggle(image)) {
+                                    val currentlySelected = selectedImages.contains(image)
+                                    onSelectImage(image, !currentlySelected)
+                                    toggledDuringDrag.add(image)
+                                }
+                            }
+
+                            event.changes.forEach { change ->
+                                if (change.changedToUp()) {
+                                    toggledDuringDrag.clear()
+                                }
+                                change.consume()
+                            }
                         }
-                    )
-            ) {
-                if (model != null) {
-                    AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current)
-                            .data(model)
-                            .crossfade(true)
-                            .build(),
-                        contentDescription = "Thumbnail",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                        placeholder = painterResource(R.drawable.placeholder_thumbnail),
-                        error = painterResource(R.drawable.placeholder_thumbnail),
-                        fallback = painterResource(R.drawable.placeholder_thumbnail)
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.Gray),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("No preview", color = Color.White)
+                    }
+                }
+        } else Modifier.fillMaxSize()
+    ) {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = 100.dp),
+            contentPadding = PaddingValues(4.dp),
+            modifier = Modifier.fillMaxSize(),
+            state = gridState
+        ) {
+            items(images, key = { it.uri }) { image ->
+                val model = thumbnailCache[image.uri] ?: image.localUri ?: image.thumbnailUrl ?: image.remoteUrl
+                val isSelected = selectedImages.contains(image)
+
+                if (requestThumbnail != null) {
+                    LaunchedEffect(image.uri) {
+                        requestThumbnail(image)
                     }
                 }
 
-                // Overlay selection check if selected
-                if (isSelected) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.5f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.CheckCircle,
-                            contentDescription = "Selected",
-                            tint = Color.White
+                Box(
+                    modifier = Modifier
+                        .padding(4.dp)
+                        .aspectRatio(1f)
+                        .combinedClickable(
+                            onClick = {
+                                if (isDownloading) return@combinedClickable
+                                if (selectionEnabled) {
+                                    if (canToggle(image)) {
+                                        onSelectImage(image, !isSelected)
+                                    }
+                                } else {
+                                    onImageClick(image)
+                                }
+                            },
+                            onLongClick = {
+                                if (isDownloading) return@combinedClickable
+                                onLongClick(image)
+                            }
                         )
+                ) {
+                    if (model != null) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(LocalContext.current)
+                                .data(model)
+                                .crossfade(true)
+                                .build(),
+                            contentDescription = "Thumbnail",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                            placeholder = painterResource(R.drawable.placeholder_thumbnail),
+                            error = painterResource(R.drawable.placeholder_thumbnail),
+                            fallback = painterResource(R.drawable.placeholder_thumbnail)
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Gray),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("No preview", color = Color.White)
+                        }
                     }
-                }
 
-                if (isDownloading) {
-                    Box(
-                        modifier = Modifier
-                            .matchParentSize()
-                            .background(Color.Black.copy(alpha = 0.5f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator()
+                    if (isSelected) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.5f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = "Selected",
+                                tint = Color.White
+                            )
+                        }
+                    }
+
+                    if (isDownloading) {
+                        Box(
+                            modifier = Modifier
+                                .matchParentSize()
+                                .background(Color.Black.copy(alpha = 0.5f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator()
+                        }
                     }
                 }
             }
@@ -857,16 +905,10 @@ fun FullscreenImagePager(
             val image = images[page]
             val model = image.remoteUrl ?: image.localUri ?: image.thumbnailUrl
             if (model != null) {
-                AsyncImage(
-                    model = ImageRequest.Builder(LocalContext.current)
-                        .data(model)
-                        .crossfade(true)
-                        .build(),
-                    contentDescription = "Preview Image",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clickable { onClose() }
+                ZoomableImage(
+                    model = model,
+                    modifier = Modifier.fillMaxSize(),
+                    contentDescription = "Preview Image"
                 )
             }
         }
@@ -883,6 +925,53 @@ fun FullscreenImagePager(
 }
 
 @Composable
+fun ZoomableImage(
+    model: Any,
+    modifier: Modifier = Modifier,
+    contentDescription: String? = null
+) {
+    var scale by remember { mutableStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    var rotationState by remember { mutableStateOf(0f) } // optional rotation support
+
+    val maxScale = 5f
+    val minScale = 1f
+
+    Box(
+        modifier = modifier
+            .background(Color.Black)
+            .pointerInput(Unit) {
+                detectTransformGestures { _, pan, zoom, _ ->
+                    val newScale = (scale * zoom).coerceIn(minScale, maxScale)
+                    scale = newScale
+
+                    // Only allow offset movement if zoomed in
+                    if (newScale > 1f) {
+                        offset += pan
+                    } else {
+                        offset = Offset.Zero
+                    }
+                }
+            }
+            .graphicsLayer(
+                scaleX = scale,
+                scaleY = scale,
+                translationX = offset.x,
+                translationY = offset.y
+            )
+    ) {
+        AsyncImage(
+            model = model,
+            contentDescription = contentDescription,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize()
+        )
+    }
+}
+
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
 fun IntervalCapturedImagesPopup(
     images: List<CapturedImage>,
     selectedImages: Set<CapturedImage>,
@@ -891,6 +980,22 @@ fun IntervalCapturedImagesPopup(
     onSelectImage: (CapturedImage, Boolean) -> Unit,
     isDownloading: Boolean
 ) {
+    val gridState = rememberLazyGridState()
+    val toggledDuringDrag = remember { mutableSetOf<CapturedImage>() }
+    val lastToggleTimes = remember { mutableMapOf<CapturedImage, Long>() }
+    val toggleCooldownMs = 300L
+
+    fun canToggle(image: CapturedImage): Boolean {
+        val now = System.currentTimeMillis()
+        val lastToggle = lastToggleTimes[image] ?: 0L
+        return if (now - lastToggle > toggleCooldownMs) {
+            lastToggleTimes[image] = now
+            true
+        } else {
+            false
+        }
+    }
+
     Dialog(onDismissRequest = { if (!isDownloading) onDismiss() }) {
         Box(
             modifier = Modifier
@@ -905,44 +1010,89 @@ fun IntervalCapturedImagesPopup(
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("Captured Images", style = MaterialTheme.typography.titleMedium, color = Color.White)
                     Spacer(Modifier.height(8.dp))
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(3),
-                        modifier = Modifier.height(300.dp)
-                    ) {
-                        items(images, key = { it.uri }) { image ->
-                            val model = image.localUri ?: image.thumbnailUrl ?: image.remoteUrl
-                            Box(
-                                modifier = Modifier
-                                    .padding(4.dp)
-                                    .aspectRatio(1f)
-                                    .clickable(enabled = !isDownloading) {
-                                        val isSelected = selectedImages.contains(image)
-                                        onSelectImage(image, !isSelected)
+
+                    Box(
+                        modifier = Modifier
+                            .height(300.dp)
+                            .pointerInput(images, selectedImages) {
+                                awaitPointerEventScope {
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val pointer = event.changes.firstOrNull() ?: continue
+                                        val pos = pointer.position
+
+                                        val hitItemInfo = gridState.layoutInfo.visibleItemsInfo.find { info ->
+                                            val xInBounds = pos.x >= info.offset.x && pos.x <= info.offset.x + info.size.width
+                                            val yInBounds = pos.y >= info.offset.y && pos.y <= info.offset.y + info.size.height
+                                            xInBounds && yInBounds
+                                        }
+
+                                        if (hitItemInfo != null) {
+                                            val image = images.getOrNull(hitItemInfo.index)
+                                            if (image != null && !toggledDuringDrag.contains(image) && canToggle(image)) {
+                                                val currentlySelected = selectedImages.contains(image)
+                                                onSelectImage(image, !currentlySelected)
+                                                toggledDuringDrag.add(image)
+                                            }
+                                        }
+
+                                        event.changes.forEach { change ->
+                                            if (change.changedToUp()) {
+                                                toggledDuringDrag.clear()
+                                            }
+                                            change.consume()
+                                        }
                                     }
-                            ) {
-                                AsyncImage(
-                                    model = model,
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                                if (selectedImages.contains(image)) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .background(Color.Black.copy(alpha = 0.5f)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.CheckCircle,
-                                            contentDescription = "Selected",
-                                            tint = Color.White
+                                }
+                            }
+                    ) {
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(3),
+                            state = gridState,
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            items(images, key = { it.uri }) { image ->
+                                val model = image.localUri ?: image.thumbnailUrl ?: image.remoteUrl
+                                val isSelected = selectedImages.contains(image)
+
+                                Box(
+                                    modifier = Modifier
+                                        .padding(4.dp)
+                                        .aspectRatio(1f)
+                                        .combinedClickable(
+                                            onClick = {
+                                                if (!isDownloading && canToggle(image)) {
+                                                    onSelectImage(image, !isSelected)
+                                                }
+                                            },
+                                            onLongClick = {}
                                         )
+                                ) {
+                                    AsyncImage(
+                                        model = model,
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                    if (isSelected) {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .background(Color.Black.copy(alpha = 0.5f)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.CheckCircle,
+                                                contentDescription = "Selected",
+                                                tint = Color.White
+                                            )
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+
                     Spacer(Modifier.height(12.dp))
                     Row(
                         horizontalArrangement = Arrangement.End,
