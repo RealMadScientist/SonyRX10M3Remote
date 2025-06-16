@@ -1157,37 +1157,37 @@ class MainActivity : AppCompatActivity() {
 
                 if (shutterDurationMs > 1000) {
                     // Long capture duration: run performTimedCapture, which handles capture result internally
-                    performTimedCapture(shutterDurationMs)
+                    val result = performTimedCapture(shutterDurationMs)
+                    handleCaptureResult(result)
                 } else {
                     // Short capture duration: captureStill returns CaptureResult directly
                     val result = cameraController.captureStill()
                     handleCaptureResult(result)
-
-                    if (isAutoFocusEngaged) {
-                        // Autofocus: clear UI and flags after capture
-                        stopAutoFocusUI()
-                    } else if (isTouchAFEngaged) {
-                        // TouchAF: keep focus UI and flags as-is
-                        runOnUiThread {
-                            btnAutoFocus.applySmartTint(android.R.color.holo_green_light)
-                            btnAutoFocus.text = "AF: On"
-                            btnCapture.isEnabled = true
-                            btnVideo.isEnabled = true
-                        }
-                    } else {
-                        // No focus: reset UI normally
-                        runOnUiThread {
-                            btnAutoFocus.applySmartTint()
-                            btnAutoFocus.text = "Auto Focus"
-                            btnCapture.isEnabled = true
-                            btnVideo.isEnabled = true
-                        }
-                    }
-
-                    btnCapture.text = "Capture"
-                    btnCapture.applySmartTint()
-                    btnCapture.isEnabled = true
                 }
+                if (isAutoFocusEngaged) {
+                    // Autofocus: clear UI and flags after capture
+                    stopAutoFocusUI()
+                } else if (isTouchAFEngaged) {
+                    // TouchAF: keep focus UI and flags as-is
+                    runOnUiThread {
+                        btnAutoFocus.applySmartTint(android.R.color.holo_green_light)
+                        btnAutoFocus.text = "AF: On"
+                        btnCapture.isEnabled = true
+                        btnVideo.isEnabled = true
+                    }
+                } else {
+                    // No focus: reset UI normally
+                    runOnUiThread {
+                        btnAutoFocus.applySmartTint()
+                        btnAutoFocus.text = "Auto Focus"
+                        btnCapture.isEnabled = true
+                        btnVideo.isEnabled = true
+                    }
+                }
+
+                btnCapture.text = "Capture"
+                btnCapture.applySmartTint()
+                btnCapture.isEnabled = true
             }
         }
     }
