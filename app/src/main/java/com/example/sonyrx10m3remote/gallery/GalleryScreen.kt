@@ -7,7 +7,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.lazy.grid.*
@@ -41,11 +41,8 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.sonyrx10m3remote.camera.CameraController
 import com.example.sonyrx10m3remote.data.CapturedImage
-import com.example.sonyrx10m3remote.gallery.GalleryViewModel
 import com.example.sonyrx10m3remote.media.MediaManager
 import com.example.sonyrx10m3remote.R
-import java.util.*
-import kotlinx.coroutines.delay
 
 data class ScrollPosition(val index: Int = 0, val offset: Int = 0)
 
@@ -932,24 +929,36 @@ fun ZoomableImage(
 ) {
     var scale by remember { mutableStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
-    var rotationState by remember { mutableStateOf(0f) } // optional rotation support
 
     val maxScale = 5f
     val minScale = 1f
 
     Box(
         modifier = modifier
-            .background(Color.Black)
-            .pointerInput(Unit) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    val newScale = (scale * zoom).coerceIn(minScale, maxScale)
-                    scale = newScale
+            .pointerInput(scale) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val zoomChange = event.calculateZoom()
+                        val panChange = event.calculatePan()
 
-                    // Only allow offset movement if zoomed in
-                    if (newScale > 1f) {
-                        offset += pan
-                    } else {
-                        offset = Offset.Zero
+                        // Only apply zoom if there was a pinch
+                        if (zoomChange != 1f) {
+                            val newScale = (scale * zoomChange).coerceIn(minScale, maxScale)
+                            scale = newScale
+                        }
+
+                        // Only apply pan if zoomed in
+                        if (scale > 1f) {
+                            offset += panChange
+                        } else {
+                            offset = Offset.Zero
+                        }
+
+                        // If zoomed in, consume horizontal drags to prevent pager swipes
+                        if (scale > 1f) {
+                            event.changes.forEach { it.consume() }
+                        }
                     }
                 }
             }
@@ -959,6 +968,7 @@ fun ZoomableImage(
                 translationX = offset.x,
                 translationY = offset.y
             )
+            .background(Color.Black)
     ) {
         AsyncImage(
             model = model,
@@ -968,7 +978,6 @@ fun ZoomableImage(
         )
     }
 }
-
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
