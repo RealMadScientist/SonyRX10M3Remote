@@ -45,6 +45,13 @@ I have no intention to maintain or officially support this app for others, but I
 
 ### Build & Run
 
+-> From the APK:
+1. Enable “Install unknown apps” for your device.
+2. Download the APK.
+3. Tap to install.
+4. Open the app and grant camera permissions.
+
+-> From the source code:
 1. Clone the repository:
 
    ```bash
@@ -60,8 +67,10 @@ I have no intention to maintain or officially support this app for others, but I
 ## Notes
 
 - Uses Sony’s deprecated Camera Remote API — some features may not work on all camera firmware versions.  
-- Intervalometer and burst capture features are fully functional but file transfer is handled externally for now.  
-- Developed with minimal UI to focus on core camera control functionality.  
+- Intervalometer and burst capture features are fully functional.
+- Gallery and file transfer have been implemented, but are buggy and incomplete.
+- Developed with minimal UI to focus on core camera control functionality.
+- Likely littered with bugs that haven't been tested/I wasn't bothered to deal with. E.g, connection to camera only works properly if it's set to manual mode from the start.
 
 ---
 
@@ -73,4 +82,4 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ## Contact
 
-For questions or feedback, please open an issue on GitHub or reach out via email.
+I won't be actively maintaining this app in any way. If you have a problem, feel free to create a GitHub issue on the off chance that someone has a solution, but more than likely it's just a bug that I never got around to dealing with after it started working sufficiently for me.
