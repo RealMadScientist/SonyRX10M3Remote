@@ -64,6 +64,13 @@ I have no intention to maintain or officially support this app for others, but I
 
 ---
 
+### How to Use:
+
+1. Set your camera to manual "M" mode, and open the Smart Remote Control app in Menu -> Application -> Application List -> Smart Remote Control. This should display a QR code for connection to the camera's wifi.
+2. Open the app on your android device and press "connect to camera". Scan the QR code on your camera and select the wifi network when it shows up.
+3. Wait for the software to initialise (the live view will display when this is complete).
+4. Use the app to capture photos how you would like, or use the gallery to browse/download images.
+
 ## Notes
 
 - Uses Sony’s deprecated Camera Remote API — some features may not work on all camera firmware versions.  

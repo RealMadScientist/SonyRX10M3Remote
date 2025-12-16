@@ -399,6 +399,12 @@ class CameraController(baseUrl: String) {
                 return CaptureResult(true, urls)
             }
 
+            /**
+             * NOTE: Sony API quirk/bug:
+             * actTakePicture may return no image URLs for long timed exposures (e.g. 30s)
+             * even though the capture succeeds and the file is written to the SD card.
+             * Empty URLs here technically do NOT imply failure - can fix this later if it's too annoying.
+            */
             Log.e(TAG, "Image capture failed: empty result")
             return CaptureResult(false)
 
